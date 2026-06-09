@@ -67,7 +67,7 @@ from telar.csv_utils import get_source_url
 # Video URL patterns for media type detection (matches generate_collections.py)
 _VIDEO_URL_PATTERNS = ['youtube.com', 'youtu.be', 'vimeo.com', 'drive.google.com']
 _AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.m4a', '.MP3', '.OGG', '.M4A']
-
+_3D_EXTENSIONS = ['.glb']
 
 def _detect_media_type(source_url, object_id):
     """Detect media type from source URL and object files on disk.
@@ -80,6 +80,9 @@ def _detect_media_type(source_url, object_id):
         return 'Video'
     objects_dir = Path('telar-content/objects')
     if objects_dir.exists():
+        for ext in _3D_EXTENSIONS:
+            if (objects_dir / f'{object_id}{ext}').exists():
+                return '3D'
         for ext in _AUDIO_EXTENSIONS:
             if (objects_dir / f'{object_id}{ext}').exists():
                 return 'Audio'
@@ -285,7 +288,7 @@ def process_objects(df, christmas_tree=False):
         df = inject_christmas_tree_errors(df)
 
     # Validate and clean object_id values
-    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff', '.bmp', '.svg', '.pdf']
+    valid_extensions = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.tif', '.tiff', '.bmp', '.svg', '.pdf', '.glb']
     for idx, row in df.iterrows():
         object_id = str(row.get('object_id', '')).strip()
         original_id = object_id
@@ -651,7 +654,7 @@ def process_objects(df, christmas_tree=False):
         if source_url:
             continue
 
-        # Audio objects need audio files, not images — validate accordingly
+        # Audio, and 3D objects need audio files, or 3D files respectively, not images — validate accordingly
         obj_media_type = _detect_media_type('', object_id)
         if obj_media_type == 'Audio':
             # Find which audio extension matches
@@ -679,6 +682,25 @@ def process_objects(df, christmas_tree=False):
                 msg = f"Object {object_id} has no audio file in telar-content/objects/"
                 print(f"  [WARN] {msg}")
                 warnings.append(msg)
+            continue
+        if obj_media_type == '3D':
+            model_extensions = ['.glb']
+            objects_dir = Path('telar-content/objects')
+            model_found = None
+            for ext in model_extensions:
+                model_path = objects_dir / f'{object_id}{ext}'
+                if model_path.exists():
+                    model_found = model_path
+                    break
+                
+            if model_found:
+                print(f"  [INFO] Object {object_id} uses local 3D model: {model_found}")
+            else:
+                error_msg = get_lang_string('errors.object_warnings.model_missing', object_id=object_id)
+                df.at[idx, 'object_warning'] = error_msg
+                df.at[idx, 'object_warning_short'] = '3D model file missing'
+                print(f"  [WARN] {error_msg}")
+                warnings.append(error_msg)
             continue
 
         # No external IIIF manifest - check for local image file
