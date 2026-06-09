@@ -67,6 +67,7 @@ _VIDEO_URL_PATTERNS = ['youtube.com', 'youtu.be', 'vimeo.com', 'drive.google.com
 # Audio file extensions supported (must match audio-card.js in card runtime)
 _AUDIO_EXTENSIONS = ['.mp3', '.ogg', '.m4a', '.MP3', '.OGG', '.M4A']
 
+_3D_EXTENSIONS = ['.glb']
 
 def detect_media_type(source_url, object_id):
     """Auto-detect media type for gallery Type filter.
@@ -79,7 +80,7 @@ def detect_media_type(source_url, object_id):
         object_id:  The object's ID, used to find matching audio files on disk.
 
     Returns:
-        str: 'Video', 'Audio', or 'Image'.
+        str: 'Video', 'Audio', '3D', or 'Image'.
     """
     url = (source_url or '').strip()
 
@@ -87,12 +88,15 @@ def detect_media_type(source_url, object_id):
     if any(pat in url for pat in _VIDEO_URL_PATTERNS):
         return 'Video'
 
-    # Check for audio file in objects content directory
+    # Check for audioor 3D file in objects content directory
     objects_content_dir = Path('telar-content/objects')
     if objects_content_dir.exists():
         for ext in _AUDIO_EXTENSIONS:
             if (objects_content_dir / f'{object_id}{ext}').exists():
                 return 'Audio'
+        for ext in _3D_EXTENSIONS:
+            if (objects_content_dir / f'{object_id}{ext}').exists():
+                return '3D'
 
     return 'Image'
 
