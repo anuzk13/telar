@@ -92,6 +92,12 @@ object:
   # Object thumbnails
   no_image: "No image"
 
+  # 3D object viewer
+  model_viewer:
+    orbit_hint: "drag to rotate · scroll to zoom · ctrl+drag to pan"
+    loading_model: "Loading 3D model..."
+    model_not_found: "3D model could not be loaded. Check that the .glb file exists in telar-content/objects/."
+
 # Demo content labels
 demo:
   badge: "DEMO"

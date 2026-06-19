@@ -1,0 +1,20 @@
+/**
+ * Viewer 3D
+ *
+ * Styles for 3D object viewer
+ */
+
+#object-viewer.viewer-3d {
+  aspect-ratio: 1 / 1;
+  max-height: 80vh;
+  overflow: hidden;
+  background: #fff url(../img/background-gris.svg) repeat;
+  background-size: 20px auto;
+  box-shadow: inset 0 2px 12px rgba(0, 0, 0, 0.12), inset 0 -2px 12px rgba(0, 0, 0, 0.08);
+}
+
+#object-viewer.viewer-3d canvas { 
+  display: block; 
+  // Combined with threejs transparent background makes the shadow independent of view
+  filter: drop-shadow(0 10px 14px rgba(0, 0, 0, 0.35));
+}

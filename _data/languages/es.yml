@@ -92,6 +92,12 @@ object:
   # Miniaturas de objetos
   no_image: "Sin imagen"
 
+  # Visor de objetos 3D
+  model_viewer:
+    orbit_hint: "Arrastra para rotar · scroll para acercar · ctrl+arrastrar para mover"
+    loading_model: "Cargando modelo 3D..."
+    model_not_found: "No se pudo cargar el modelo 3D. Verifica que el archivo .glb exista en telar-content/objects/."
+
 # Etiquetas de contenido de demostración
 demo:
   badge: "DEMO"

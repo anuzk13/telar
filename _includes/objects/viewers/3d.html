@@ -1,0 +1,16 @@
+<div id="object-viewer" class="viewer-3d"
+     role="img"
+     aria-label="{{ page.alt_text | default: page.title | default: page.object_id | default: '3D model viewer' }}"
+     data-model-url="{{ site.baseurl }}/telar-content/objects/{{ page.object_id }}.glb"></div>
+<div id="model-loading">
+  {{ lang.object.model_viewer.loading_model}}
+</div>
+<div id="model-error" class="alert alert-warning m-3">
+  {{ lang.object.model_viewer.model_not_found}}
+</div>
+<p class="text-muted small mt-2">
+  {{ lang.object.model_viewer.orbit_hint }}
+</p>
+
+<script src="{{ '/assets/vendor/umd_threejs.js' | relative_url }}"></script>
+<script src="{{ '/assets/js/objects/3d-viewer.js' | relative_url }}"></script>

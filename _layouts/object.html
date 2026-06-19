@@ -27,8 +27,12 @@ layout: default
       </div>
       {% endif %}
 
+      {% if object_media_type == '3D' %}
+      {% include objects/viewers/3d.html %}
+      {% else %}
       <div id="object-viewer" class="viewer-{{ object_media_type | downcase }}"
            {% if object_media_type == 'Image' %}role="img" aria-label="{{ page.alt_text | default: page.title | default: page.object_id | default: 'Image viewer' }}"{% endif %}></div>
+      {% endif %}
 
       {% if object_media_type == 'Image' %}
         <!-- Coordinate Tools Button -->

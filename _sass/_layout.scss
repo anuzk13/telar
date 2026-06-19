@@ -293,8 +293,9 @@
   margin-top: 1rem;
 }
 
-// Video/audio gallery thumbnails
+// Video/3D/audio gallery thumbnails
 .video-thumbnail,
+.model-thumbnail,
 .audio-thumbnail {
   height: 250px;
   background: var(--color-button-bg, #883C36);
@@ -312,6 +313,7 @@
 
 // Smaller icons for featured objects grid and story cards
 .featured-objects-grid .video-thumbnail,
+.featured-objects-grid .model-thumbnail,
 .featured-objects-grid .audio-thumbnail {
   height: auto;
   aspect-ratio: 1;
