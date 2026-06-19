@@ -125,6 +125,14 @@ COLUMN_NAME_MAPPING = {
     'definicion': 'definition',
     'términos_relacionados': 'related_terms',
     'terminos_relacionados': 'related_terms',
+
+    #3D objects (Spanish -> English)
+    'giro_horizontal': 'orbit_horizontal',
+    'giro_vertical': 'orbit_vertical',
+    'acercamiento': 'orbit_zoom',
+    'centro_x': 'center_x',
+    'centro_y': 'center_y',
+    'centro_z': 'center_z',
 }
 
 
