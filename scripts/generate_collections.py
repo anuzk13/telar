@@ -56,9 +56,10 @@ KNOWN_OBJECT_FIELDS = {
     'location', 'credit', 'thumbnail', 'iiif_manifest', 'source_url',
     'source', 'object_warning', 'object_warning_short', 'year',
     'object_type', 'subjects', 'is_featured_sample', '_demo',
-    'description', 'featured',
+    'description', 'featured', 'alt_text', 
     # v0.10.0: auto-detected media type and audio metadata
     'media_type', 'audio_duration', 'audio_filesize', 'audio_format',
+
 }
 
 
@@ -118,6 +119,7 @@ def generate_objects():
 
         # Metadata fields — only include if non-empty
         metadata_fields = {
+            'alt_text': obj.get('alt_text', ''),
             'creator': obj.get('creator', ''),
             'period': obj.get('period', ''),
             'medium': medium_value,
