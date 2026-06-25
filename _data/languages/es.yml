@@ -70,6 +70,8 @@ object:
     reset_view: "Restablecer la vista"
     navigator_aria: "Vista previa del modelo 3D y controles de navegación"
     model_load_error: "No se pudo cargar el modelo 3D."
+    loading_model: "Cargando modelo 3D…"
+    orbit_hint: "Arrastra para rotar · scroll para acercar · ctrl+arrastrar para mover"
 
   # Herramienta de identificación de coordenadas
   coordinates:
