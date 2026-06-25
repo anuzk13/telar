@@ -11,6 +11,7 @@
   const THREE = window.THREE;
   const OrbitControls = window.OrbitControls;
   const GLTFLoader = window.GLTFLoader;
+  const RoomEnvironment = window.RoomEnvironment;
 
   let container, errorContainer, loadingContainer;
   let reduceMotion;
@@ -37,9 +38,6 @@
     camera = new THREE.PerspectiveCamera( CAMERA_FOV, aspect, CAMERA_NEAR, CAMERA_FAR );
 
     scene = new THREE.Scene();
-    
-    initLights();
-    loadModel(modelUrl);
 
     renderer = new THREE.WebGLRenderer( { antialias: true, alpha: true } );
     renderer.setClearAlpha(0);
@@ -48,6 +46,9 @@
     renderer.setAnimationLoop( render );
     renderer.toneMapping = THREE.NeutralToneMapping;
     container.appendChild( renderer.domElement );
+
+    initEnvironment();
+    loadModel(modelUrl);
 
     controls = new OrbitControls( camera, renderer.domElement );
     // Respect reduced-motion: damping adds a glide animation to camera moves.
@@ -69,18 +70,13 @@
     picker.refresh();
   }
 
-  // https://github.com/mrdoob/three.js/blob/master/examples/webgl_lights_hemisphere.html
-  function initLights() {
-    const hemiLight = new THREE.HemisphereLight( 0xffffff, 0xbbbbbb, 1.2 );
-    hemiLight.position.set( 0, 50, 0 );
-    scene.add( hemiLight );
+  function initEnvironment() {
+    const environment = new RoomEnvironment();
+    const pmremGenerator = new THREE.PMREMGenerator( renderer );
+    const envMap = pmremGenerator.fromScene( environment ).texture;
+    scene.environment = envMap;
 
-    const dirLight = new THREE.DirectionalLight( 0xffffff, 2.0 );
-    dirLight.position.set( - 1, 1.75, 1 );
-    dirLight.position.multiplyScalar( 30 );
-    scene.add( dirLight );
-
-    dirLight.castShadow = false;
+    pmremGenerator.dispose();
   }
 
   function loadModel (modelUrl) {
