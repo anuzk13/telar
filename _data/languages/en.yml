@@ -68,6 +68,7 @@ object:
     pan_left: "Pan left"
     pan_right: "Pan right"
     reset_view: "Reset view"
+    navigator_aria: "3D model previsualization and navigation controls"
 
   # Coordinate identification tool
   coordinates:
