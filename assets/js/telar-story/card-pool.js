@@ -462,11 +462,11 @@ export function initCardPool(storyData, config) {
 
   // Audio object manifest: maps object_id → file extension (e.g. 'mp3')
   // Injected by story.html as window.audioObjects from _data/audio_objects.json
-  const audioObjects = storyData?.audioObjects || window.audioObjects || {};
+  const audioObjects = window.audioObjects || {};
 
   // 3D model manifest: maps object_id → file extension (e.g. 'glb')
   // Injected by story.html as window.modelObjects from _data/model_objects.json
-  const modelObjects = storyData?.modelObjects || window.modelObjects || {};
+  const modelObjects = window.modelObjects || {};
 
   // Build the `file_path` detectCardType uses to recognise self-hosted audio
   // and 3D objects (both are declared by file presence, not a CSV column).
