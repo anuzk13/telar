@@ -70,6 +70,8 @@ object:
     reset_view: "Reset view"
     navigator_aria: "3D model previsualization and navigation controls"
     model_load_error: "Could not load the 3D model."
+    loading_model: "Loading 3D model…"
+    orbit_hint: "Drag to rotate · scroll to zoom · ctrl+drag to pan"
 
   # Coordinate identification tool
   coordinates:
