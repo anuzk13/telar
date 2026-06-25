@@ -3,17 +3,16 @@
   const INIT_ORBIT = '0deg 75deg 105%';
 
   let mv, reduceMotion;
-  let container;
-  let modelID, baseUrl;
-  let triedGltf = false;
+  let container, errorContainer;
+  let modelURL;
 
   init();
 
   function init() {
     container = document.getElementById('object-viewer');
+    errorContainer = document.getElementById('model-error');
 
-    modelID = container.dataset.modelId;
-    baseUrl = container.dataset.baseUrl;
+    modelURL = container.dataset.modelUrl;
     const altText = container.dataset.altText;
     initModelViewer(altText);
     mv.addEventListener('load', function () {
@@ -32,7 +31,6 @@
   }
 
   function initModelViewer(altText) {
-    const modelURL = baseUrl + '/telar-content/objects/' + modelID + '.glb';
     mv = document.createElement('model-viewer');
     mv.setAttribute('src', modelURL);
     mv.setAttribute('camera-controls', '');
@@ -40,15 +38,12 @@
     mv.setAttribute('shadow-intensity', '0.5');
     mv.setAttribute('exposure', '1');
     mv.setAttribute('alt', altText);
-    mv.addEventListener('error', handleModelExtensionError);
+    mv.addEventListener('error', showError);
     container.appendChild(mv);
   }
 
-  function handleModelExtensionError() {
-    if (!triedGltf) { 
-      triedGltf = true;
-      mv.setAttribute('src', baseUrl + '/telar-content/objects/' + modelID + '.gltf'); 
-    }
+  function showError() {
+    errorContainer.style.display = 'block';
   }
 
   class ModelNav {

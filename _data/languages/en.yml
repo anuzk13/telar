@@ -69,6 +69,7 @@ object:
     pan_right: "Pan right"
     reset_view: "Reset view"
     navigator_aria: "3D model previsualization and navigation controls"
+    model_load_error: "Could not load the 3D model."
 
   # Coordinate identification tool
   coordinates:

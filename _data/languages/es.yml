@@ -69,6 +69,7 @@ object:
     pan_right: "Desplazar hacia la derecha"
     reset_view: "Restablecer la vista"
     navigator_aria: "Vista previa del modelo 3D y controles de navegación"
+    model_load_error: "No se pudo cargar el modelo 3D."
 
   # Herramienta de identificación de coordenadas
   coordinates:

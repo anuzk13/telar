@@ -2,8 +2,7 @@
     role="img"
     aria-label="{{ lang.object.model_nav.navigator_aria }}"
     data-alt-text="{{ page.alt_text | escape }}"
-    data-base-url = "{{ site.baseurl }}"
-    data-model-id="{{ page.object_id }}">
+    data-model-url="{{ site.baseurl }}/telar-content/objects/{{ page.object_id }}.{{ site.data.model_objects[page.object_id] }}">
 
   <div id="modelNav"
     class="model-nav"
@@ -61,6 +60,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><polyline points="3 4 3 9 8 9"/></svg>
     </button>
   </div>
+</div>
+<div id="model-error" class="alert alert-warning m-3" style="display: none;">
+  {{ lang.object.model_nav.model_load_error }}
 </div>
 
 <!-- 3D camera-position picker: read the live model-viewer camera and copy the
