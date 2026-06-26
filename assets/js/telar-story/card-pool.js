@@ -845,77 +845,7 @@ export function activateCard(index, direction) {
   } else {
     // Backward navigation
     if (needsNewViewer) {
-      // Per-scene plates: distinct scenes own distinct DOM elements. (An
-      // intra-scene mode change resolves currentPlate === prevPlate; the
-      // add-is-active-then-reveal-previous order below leaves the shared plate
-      // active, so backward mode flips on one object stay visible.)
-      // NOTE: a real backward *jump* (not yet implemented) must derive the
-      // departing scene from the actual state.currentIndex, not index + 1.
-      const currentSceneIndex = getSceneIndex(index + 1);
-      const currentPlate = currentSceneIndex >= 0 ? state.viewerPlates[currentSceneIndex] : null;
-      const prevPlate = state.viewerPlates[getSceneIndex(index)];
-
-      {
-        // Different DOM elements always — slide current plate down, reveal previous
-        if (currentPlate) {
-          if (currentPlate.classList.contains('video-plate')) {
-            // Snap immediately off-screen. Video/audio iframes on mobile
-            // can break CSS transform transitions (compositing layer issues
-            // with cross-origin iframes), so bypass the transition entirely.
-            currentPlate.style.transition = 'none';
-            currentPlate.style.transform = 'translateY(100%)';
-            void currentPlate.offsetHeight;  // force reflow
-            currentPlate.style.transition = '';
-            deactivateVideoCard(currentPlate);
-          } else if (currentPlate.classList.contains('audio-plate')) {
-            currentPlate.style.transition = 'none';
-            currentPlate.style.transform = 'translateY(100%)';
-            void currentPlate.offsetHeight;
-            currentPlate.style.transition = '';
-            deactivateAudioCard(currentPlate);
-          } else if (currentPlate.classList.contains('model-plate')) {
-            // Model plates animate down like IIIF (no cross-origin iframe to
-            // break the CSS transform transition), then drop the active class.
-            currentPlate.style.transform = 'translateY(100%)';
-            deactivateModelCard(currentPlate);
-          } else {
-            deactivateIiifCard(
-              { element: currentPlate, objectId: prevObjectId },
-              'backward'
-            );
-          }
-          currentPlate.classList.remove('is-active');
-        }
-        if (prevPlate) {
-          prevPlate.style.zIndex = _zPlan.plateZ[index];
-          // Snap to position without animation — the plate was offscreen
-          // from the forward transition and should appear instantly behind
-          // the departing plate.
-          prevPlate.style.transition = 'none';
-          prevPlate.style.transform = 'translateY(0)';
-          void prevPlate.offsetHeight; // force reflow
-          prevPlate.style.transition = '';
-          prevPlate.classList.add('is-active');
-          // Re-apply video/audio/model layout when returning to a media plate
-          if (prevPlate.classList.contains('video-plate')) {
-            activateVideoCard(prevPlate, getSceneIndex(index));
-          } else if (prevPlate.classList.contains('audio-plate')) {
-            activateAudioCard(prevPlate, getSceneIndex(index));
-          } else if (prevPlate.classList.contains('model-plate')) {
-            // The <model-viewer> may have been WebGL-evicted while away —
-            // recreate it (browser HTTP-caches the GLB) and restore the
-            // step's authored camera.
-            const cam = stepCameraStrings(step);
-            if (_modelPlateNeedsInit(prevPlate)) {
-              _initModelInPlate(prevPlate, objectId, getSceneIndex(index), _zPlan.plateZ[index], cam.orbit, cam.target);
-            }
-            activateModelCard(prevPlate, getSceneIndex(index));
-            // Snap the authored camera (instant via decay=0; not gated — the
-            // boundary always lands exactly). Backward object-change re-entry.
-            updateModelCamera(prevPlate, cam.orbit, cam.target);
-          }
-        }
-      }
+      _activateNewViewerPlate(objectId, index, prevObjectId, step, direction);
 
       state.currentObjectRun = { objectId, runPosition: poolEntry.runPosition };
 
@@ -1069,10 +999,10 @@ export function setCardProgress(stepIndex, progress) {
  */
 function _activateNewViewerPlate(objectId, stepIndex, prevObjectId, step, direction) {
   const sceneIndex = getSceneIndex(stepIndex);
-  const prevSceneIndex = stepIndex > 0 ? getSceneIndex(stepIndex - 1) : -1;
-
-  const prevPlate = prevSceneIndex >= 0 ? state.viewerPlates[prevSceneIndex] : null;
-  const newPlate  = sceneIndex >= 0 ? state.viewerPlates[sceneIndex] : null;
+  const fromStepIndex = direction === 'backward' ? stepIndex + 1 : stepIndex - 1;
+  const fromSceneIndex = getSceneIndex(fromStepIndex); 
+  const prevPlate = state.viewerPlates[fromSceneIndex];
+  const newPlate = state.viewerPlates[sceneIndex];
 
   if (!newPlate) return;
 
@@ -1119,22 +1049,38 @@ function _activateNewViewerPlate(objectId, stepIndex, prevObjectId, step, direct
     }
     newPlate.style.transform = 'translateY(0)';
   } else {
+    newPlate.style.transition = 'none';
     newPlate.style.transform = 'translateY(0)';
-    if (prevPlate) {
-      prevPlate.style.transform = 'translateY(100%)';
-    }
+    void newPlate.offsetHeight; // force reflow
+    newPlate.style.transition = '';
   }
 
   newPlate.classList.add('is-active');
+
   if (prevPlate) {
-    if (prevPlate.classList.contains('video-plate')) {
-      deactivateVideoCard(prevPlate);
-    } else if (prevPlate.classList.contains('audio-plate')) {
-      deactivateAudioCard(prevPlate);
-    } else if (prevPlate.classList.contains('model-plate')) {
-      deactivateModelCard(prevPlate);
-    } else {
-      prevPlate.classList.remove('is-active');
+    const kind = prevPlate.classList.contains('video-plate') ? 'video'
+               : prevPlate.classList.contains('audio-plate') ? 'audio'
+               : prevPlate.classList.contains('model-plate') ? 'model'
+               : 'iiif';
+
+    if (kind === 'video') deactivateVideoCard(prevPlate);
+    else if (kind === 'audio') deactivateAudioCard(prevPlate);
+    else if (kind === 'model') deactivateModelCard(prevPlate);
+    else deactivateIiifCard({ element: prevPlate, objectId: prevObjectId }, direction);
+
+    if (direction === 'backward') {
+      if (kind === 'video' || kind === 'audio') {
+        // Snap immediately off-screen. Video/audio iframes on mobile
+        // can break CSS transform transitions (compositing layer issues
+        // with cross-origin iframes), so bypass the transition entirely.
+        prevPlate.style.transition = 'none';
+        prevPlate.style.transform = 'translateY(100%)';
+        void prevPlate.offsetHeight; // force reflow
+        prevPlate.style.transition = '';
+        prevPlate.classList.remove('is-active');
+      } else if (kind === 'model') {
+        prevPlate.style.transform = 'translateY(100%)';
+      }
     }
   }
 
