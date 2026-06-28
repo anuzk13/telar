@@ -6,12 +6,13 @@
  * 
  */
 
+import { fitCameraToModel, setupNeutralEnvironment, readCameraSpherical } from '../3d-helpers.js';
+
 (function () {
 
   const THREE = window.THREE;
   const OrbitControls = window.OrbitControls;
   const GLTFLoader = window.GLTFLoader;
-  const RoomEnvironment = window.RoomEnvironment;
 
   let container, errorContainer, loadingContainer;
   let reduceMotion;
@@ -47,7 +48,7 @@
     renderer.toneMapping = THREE.NeutralToneMapping;
     container.appendChild( renderer.domElement );
 
-    initEnvironment();
+    setupNeutralEnvironment(renderer, scene);
     loadModel(modelUrl);
 
     controls = new OrbitControls( camera, renderer.domElement );
@@ -70,15 +71,6 @@
     picker.refresh();
   }
 
-  function initEnvironment() {
-    const environment = new RoomEnvironment();
-    const pmremGenerator = new THREE.PMREMGenerator( renderer );
-    const envMap = pmremGenerator.fromScene( environment ).texture;
-    scene.environment = envMap;
-
-    pmremGenerator.dispose();
-  }
-
   function loadModel (modelUrl) {
     const loader = new GLTFLoader();
     loader.load(
@@ -88,7 +80,7 @@
         // wait until the model can be added to the scene without blocking due to shader compilation
 				await renderer.compileAsync( gltf.scene, camera, scene );
         scene.add(gltf.scene);
-        fitCameraToModel ( camera, gltf.scene );
+        fitCameraToModel(camera, controls, gltf.scene);
         controls.saveState();   // capture the framing so nav "reset" returns here
         initControlsUI();
       },
@@ -102,33 +94,6 @@
     );
 
   }
-
-  function fitCameraToModel ( camera, model ) {
-    const box = new THREE.Box3();
-    box.setFromObject( model );
-    const sphere = box.getBoundingSphere(new THREE.Sphere());
-    const distance = getDistanceToFitSphere(sphere.radius);
-    const c = sphere.center;
-    camera.position.set(c.x, c.y, c.z + distance); 
-    camera.updateProjectionMatrix();
-    controls.target.copy(c);
-    controls.minDistance = sphere.radius * 0.2;
-    controls.maxDistance = distance + sphere.radius * 4;
-    controls.update();
-  }
-
-  /**
-   * What distance should the camera be to frame the sphere along thhe smallest dimension of the viewport?
-   *
-   * adapted from https://github.com/yomotsu/camera-controls/blob/dev/src/CameraControls.ts#L2447.
-   */
-  function getDistanceToFitSphere(radius){
-		// https://stackoverflow.com/a/44849975
-		const vFOV = camera.getEffectiveFOV() * Math.PI / 180;
-		const hFOV = Math.atan( Math.tan( vFOV * 0.5 ) * camera.aspect ) * 2;
-		const fov = 1 < camera.aspect ? vFOV : hFOV;
-		return radius / ( Math.sin( fov * 0.5 ) );
-	}
 
   function onWindowResize() {
     camera.aspect = container.clientWidth / container.clientHeight;
@@ -223,13 +188,9 @@
       this.targetEl.textContent = this._targetVals().join('  ');
     }
 
-    // Camera framing as azimuth°, elevation°, distance — spherical coordinates
-    // of the camera around the orbit target (THREE.Spherical: theta = azimuth
-    // around Y, phi = polar angle from +Y), matching model-viewer's reporting.
     _cameraVals() {
-      const offset = camera.position.clone().sub(controls.target);
-      const s = new THREE.Spherical().setFromVector3(offset);
-      return [this._deg(s.theta), this._deg(s.phi), this._round2(s.radius)];
+      const cam = readCameraSpherical(camera, controls.target);
+      return [this._round1(cam.azimuth), this._round1(cam.elevation), this._round2(cam.distance)];
     }
 
     _targetVals() {
@@ -237,7 +198,7 @@
       return [this._round2(t.x), this._round2(t.y), this._round2(t.z)];
     }
 
-    _deg(rad)  { return Math.round(rad * 180 / Math.PI * 10) / 10; }
+    _round1(n) { return Math.round(n * 10) / 10; }
     _round2(n) { return Math.round(n * 100) / 100; }
 
     _copy(text, btn) {
