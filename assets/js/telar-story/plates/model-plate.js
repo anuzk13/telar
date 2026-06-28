@@ -8,6 +8,7 @@
 import { Plate } from './base-plate.js';
 import { state } from './../state.js';
 import { getBasePath } from './../utils.js';
+import { createRenderer, fitCameraToModel, setupNeutralEnvironment } from './../../3d-helpers.js';
 
 
 const DEFAULT_ORBIT = '0deg 75deg auto';
@@ -16,65 +17,79 @@ const DEFAULT_ORBIT = '0deg 75deg auto';
 const MODEL_CAMERA_DURATION = 600;
 
 export class ModelPlate extends Plate {
-  constructor(container, meta) {
-    super(container, meta);
-    this._mv = null;          // the <model-viewer> element (null until created)
-    this._cameraRAF = null;   // in-flight discrete-ease rAF id
-    this.cameraOrbit = '';    // current camera goal (model-viewer native strings)
-    this.cameraTarget = '';
+  constructor(container, objectId, sceneIndex, zIndex) {
+    super(container, objectId, sceneIndex, zIndex);
+    this._renderer = null;
+    this._scene = null;
+    this._camera = null;
+    this._model = null;
+    this._autoFraming = null;   // bounding sphere location and framing distance calculated on load
+    this._cameraRAF = null;
   }
 
-  /**
-   * Check if the model plate has a player
-   *
-   * @returns {boolean} True if the model plate has a player, false otherwise
-   */
   hasPlayer() {
-    return !!this._mv;
+    return !!this._renderer;
   }
 
-  /**
-   * Create a <model-viewer> instance inside this plate and laods model
-   */
   createPlayer() {
-    const modelObjects = window.modelObjects;
-    const ext = modelObjects[this.objectId];
-    const basePath = getBasePath();
-    const primaryUrl = `${basePath}/telar-content/objects/${this.objectId}.${ext}`;
+    const THREE = window.THREE;
+    const GLTFLoader = window.GLTFLoader;
 
-    const objectData = state.objectsIndex[this.objectId];
-    const alt = objectData.alt_text;
+    const ext = window.modelObjects[this.objectId];
+    const url = `${getBasePath()}/telar-content/objects/${this.objectId}.${ext}`;
 
-    this.cameraOrbit = this.container.dataset.cameraOrbit || DEFAULT_ORBIT;
-    this.cameraTarget = this.container.dataset.cameraTarget || '';
     this.container.style.zIndex = this.zIndex;
     this.container.dataset.loading = 'true';
 
-    const mv = document.createElement('model-viewer');
-    mv.className = 'model-instance';
-    mv.setAttribute('camera-orbit', this.cameraOrbit);
-    if (this.cameraTarget) mv.setAttribute('camera-target', this.cameraTarget);
-    mv.setAttribute('interaction-prompt', 'none');
-    mv.setAttribute('interpolation-decay', '0');
-    mv.setAttribute('min-camera-orbit', 'auto auto 0m');
-    mv.setAttribute('loading', 'eager');
-    mv.setAttribute('shadow-intensity', '0.5');
-    mv.setAttribute('exposure', '1');
-    if (alt) mv.setAttribute('alt', alt);
+    const renderer = createRenderer(this.container);
+    renderer.domElement.className = 'model-instance';
 
-    mv.addEventListener('error', () => {
-      delete this.container.dataset.loading;
-      this._injectModelError();
-    });
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(
+      45,
+      this.container.clientWidth / this.container.clientHeight,
+      0.01,
+      1000
+    );
+    setupNeutralEnvironment(renderer, scene);
 
-    mv.addEventListener('load', () => {
-      delete this.container.dataset.loading;
-      this._settle();
-    });
+    this._renderer = renderer;
+    this._scene = scene;
+    this._camera = camera;
 
-    mv.setAttribute('src', primaryUrl);
-    this.container.appendChild(mv);
-    this._mv = mv;
+    new GLTFLoader().load(
+      url,
+      (gltf) => {
+        this._model = gltf.scene;
+        scene.add(gltf.scene);
+        this._autoFraming = fitCameraToModel(camera, gltf.scene);
+        this._applyViewOffset();
+        delete this.container.dataset.loading;
+        this._render();
+      },
+      undefined,
+      () => {
+        delete this.container.dataset.loading;
+        this._injectModelError();
+      }
+    );
+  }
+
+  _render() {
+    this._renderer.render(this._scene, this._camera);
+  }
+
+  /**
+   * Apply the view offset based on the current layout mode so the model bleeds behind the card view
+   */
+  _applyViewOffset() {
+    const w = this.container.clientWidth;
+    const h = this.container.clientHeight;
+    if (state.layoutMode === 'vertical') {
+      this._camera.setViewOffset(w, h, 0, 0.2 * h, w, h);
+    } else {
+      this._camera.setViewOffset(w, h, -0.2 * w, 0, w, h);
+    }
   }
 
   /**
