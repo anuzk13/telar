@@ -60,6 +60,7 @@ export class ModelPlate extends Plate {
     new GLTFLoader().load(
       url,
       (gltf) => {
+        if (!this._renderer) return;   // destroyPlayer() was called mid load
         this._model = gltf.scene;
         scene.add(gltf.scene);
         this._autoFraming = fitCameraToModel(camera, gltf.scene);
@@ -93,12 +94,37 @@ export class ModelPlate extends Plate {
   }
 
   /**
-   * Destroy the model player
+   * Destroy the model player, releasing its GPU resources and WebGL context.
    */
   destroyPlayer() {
     this._cancelDiscreteCameraAnim();
-    this._mv.remove();
-    this._mv = null;
+
+    // threejs.org/manual/#en/how-to-dispose-of-objects
+    // TODO: look into a singleton that implements a shared renderer across plates 
+    // https://threejs.org/manual/#en/multiple-scenes
+    // to show the overlapping plates it could use some baking of the renderer to an image
+    this._scene.traverse((obj) => {
+      if (obj.geometry) obj.geometry.dispose();
+      const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+      for (const m of materials) {
+        if (!m) continue;
+        for (const key in m) {
+          if (m[key] && m[key].isTexture) m[key].dispose();
+        }
+        m.dispose();
+      }
+    });
+    if (this._scene.environment) this._scene.environment.dispose();
+
+    this._renderer.dispose();
+    this._renderer.forceContextLoss();
+    this._renderer.domElement.remove();
+
+    this._renderer = null;
+    this._scene = null;
+    this._camera = null;
+    this._model = null;
+    this._autoFraming = null;
   }
 
   /**
