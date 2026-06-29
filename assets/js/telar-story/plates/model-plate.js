@@ -11,14 +11,13 @@ import { getBasePath } from './../utils.js';
 import { createRenderer, fitCameraToModel, setupNeutralEnvironment } from './../../3d-helpers.js';
 
 
-const DEFAULT_ORBIT = '0deg 75deg auto';
-
 /** Duration (ms) of the camera move on mobile tap, nav button and deep-link */
 const MODEL_CAMERA_DURATION = 600;
 
 export class ModelPlate extends Plate {
-  constructor(container, objectId, sceneIndex, zIndex) {
-    super(container, objectId, sceneIndex, zIndex);
+  constructor(container, objectId, sceneIndex, zIndex, initialStep) {
+    super(container, objectId, sceneIndex, zIndex, initialStep);
+    this._currentPose = null;
     this._renderer = null;
     this._scene = null;
     this._camera = null;
@@ -66,6 +65,7 @@ export class ModelPlate extends Plate {
         this._autoFraming = fitCameraToModel(camera, gltf.scene);
         this._applyViewOffset();
         delete this.container.dataset.loading;
+        this.moveStep(this._currentStep, false);
         this._render();
       },
       undefined,
@@ -135,239 +135,81 @@ export class ModelPlate extends Plate {
   }
 
   /**
-   * Apply a step's authored camera
+   * Move to a step pose eased on discrete navigation, snapped otherwise.
    */
-  applyStep(step, animate = false) {
-    const cam = stepCameraStrings(step);
-    if (animate) this._easeCamera(cam.orbit, cam.target, step);
-    else this._snapCamera(cam.orbit, cam.target);
+  moveStep(step, animate = false) {
+    this._currentStep = step;
+    if (!this._model) return;
+    const pose = this._resolvePose(step);
+    if (animate) this._easeCamera(pose);
+    else this._snapCamera(pose);
+    this._currentPose = pose;
   }
 
   /**
-   * Land a new authored camera pose instantly
+   * Resolve a step's framing columns to a numeric pose
+   *
+   * @returns {{ azimuth: number, elevation: number, distance: number, target: number[] }}
    */
-  _snapCamera(cameraOrbit, cameraTarget) {
-    if (!this._setCameraGoal(cameraOrbit, cameraTarget)) {
-      return;
-    }
+  _resolvePose(step) {
+    const [azimuth, elevation, distance] = this._stepOrbit(step);
+    const target = this._stepTarget(step);
+    return { azimuth, elevation, distance, target };
+  }
+
+  /**
+   * Read a step's orbit columns into [azimuth, elevation, distance]; empty values
+   * default to 0° / 75° / the model's ideal framing distance.
+   */
+  _stepOrbit(step) {
+    const az = _num(step.azimuth) ?? 0;
+    const el = _num(step.elevation) ?? 75;
+    const dist = _num(step.distance) ?? this._autoFraming.distance;
+    return [az, el, dist];
+  }
+
+  /**
+   * Read a step's look-at target into [x, y, z] metres; empty values default to
+   * the model's bounding-sphere centre.
+   */
+  _stepTarget(step) {
+    const x = _num(step.target_x) ?? this._autoFraming.target[0];
+    const y = _num(step.target_y) ?? this._autoFraming.target[1];
+    const z = _num(step.target_z) ?? this._autoFraming.target[2];
+    return [x, y, z];
+  }
+
+  /**
+   * Orbit the camera to a numeric pose (azimuth/elevation/distance around target)
+   * and render.
+   */
+  _applyPose({ azimuth, elevation, distance, target }) {
+    const THREE = window.THREE;
+    const offset = new THREE.Vector3().setFromSphericalCoords(
+      distance,
+      THREE.MathUtils.degToRad(elevation),
+      THREE.MathUtils.degToRad(azimuth)
+    );
+    this._camera.position.set(target[0], target[1], target[2]).add(offset);
+    this._camera.lookAt(target[0], target[1], target[2]);
+    this._render();
+  }
+
+  /** Land a new authored pose instantly. */
+  _snapCamera(pose) {
     this._cancelDiscreteCameraAnim();
-    this._applyCameraGoal();
+    this._applyPose(pose);
   }
 
   /**
-   * EASE the camera to a new authored pose over MODEL_CAMERA_DURATION.
-   * Falls back to a snap for reduced motion.
+   * Ease the camera from its current pose to `pose` 
    */
-  _easeCamera(cameraOrbit, cameraTarget, step) {
-    if (!this._setCameraGoal(cameraOrbit, cameraTarget)) return;
-    const mv = this._mv;
-    if (!mv) return; // still loading — createPlayer applies the goal on append
-    if (_reduceMotion() || !mv.loaded) {
-      this._cancelDiscreteCameraAnim();
-      this._applyCameraGoal();
-      return;
-    }
-    this._animateModelCameraDiscrete(step, this.cameraOrbit, this.cameraTarget || 'auto auto auto');
+  _easeCamera(pose) {
+    
   }
 
-  /**
-   * Persist the camera goal. Returns false when it's unchanged.
-   *
-   * @returns {boolean} whether the goal changed.
-   */
-  _setCameraGoal(cameraOrbit, cameraTarget) {
-    if (cameraOrbit === this.cameraOrbit && cameraTarget === this.cameraTarget) {
-      return false;
-    } 
-    this.cameraOrbit = cameraOrbit;
-    this.cameraTarget = cameraTarget;
-    return true;
-  }
+  _lerp (poseA, poseB, t) {
 
-  /** Set the goal on the element and force the static renderer to it. */
-  _applyCameraGoal() {
-    this._mv.cameraOrbit = this.cameraOrbit;
-    this._mv.cameraTarget = this.cameraTarget || 'auto auto auto';
-    _jumpModelCameraToGoal(this._mv);
-  }
-
-  /**
-   * Interpolate the camera between two steps based on scroll progress.
-   *
-   * The 3D analogue of iiif-card.js:lerpIiifPosition, and the fix for D1 (the
-   * camera "jumping at a threshold"). Called every frame by the scroll engine's
-   * rAF loop. For step pairs that share the same object it linearly interpolates
-   * the camera orbit (θ, φ, radius) and target between step A and step B by the
-   * fractional scroll `progress`, then assigns the result with the cameraOrbit /
-   * cameraTarget property setters. Because the element carries
-   * `interpolation-decay="0"`, each assignment applies instantly — smoothness
-   * comes from Lenis calling this every frame, exactly like snapIiifToPosition.
-   *
-   * Different-object pairs are frozen (the new plate slides in on top, same as
-   * IIIF). Progress below 0.001 is skipped (already at the integer step); at
-   * progress ≥ 0.999 the camera snaps exactly to step B so the boundary always
-   * lands even on a fast scroll or snap.
-   *
-   * (The scene/plate lookup of the old lerpModelCamera moved to the orchestrator,
-   * which resolves the active plate and the step pair, then calls this directly.)
-   *
-   * @param {number} progress - Fractional progress 0.0–1.0 toward the next step.
-   * @param {Object} stepA
-   * @param {Object} stepB
-   */
-  lerp(progress, stepA, stepB) {
-    if (progress < 0.001) return; // at exact integer step, no interpolation needed
-    if (!stepA || !stepB) return;
-
-    const objectIdA = stepA.object || stepA.objectId || '';
-    const objectIdB = stepB.object || stepB.objectId || '';
-    if (objectIdA !== objectIdB) return; // different object → freeze
-
-    this._cancelDiscreteCameraAnim(); // a scroll frame supersedes any discrete ease
-
-    // Snap exactly to step B at the boundary so the endpoint always lands.
-    const p = progress >= 0.999 ? 1 : progress;
-
-    // ── Orbit (numeric columns) ─────────────────────────────────────────────────
-    // azimuth / elevation / distance are plain numbers. A missing endpoint mirrors
-    // the other (no movement on that axis); both azimuth/elevation missing default
-    // to 0°/75°; both distance missing → 'auto' radius (idealCameraDistance). One
-    // unit throughout (degrees / metres), so this is a straight numeric lerp.
-    const azP   = _lerpPair(_num(stepA.azimuth),   _num(stepB.azimuth),   0);
-    const elP   = _lerpPair(_num(stepA.elevation), _num(stepB.elevation), 75);
-    const distP = _lerpPair(_num(stepA.distance),  _num(stepB.distance),  null);
-
-    // Shortest-path azimuth: wrap Δθ into [−180°, 180°].
-    let dTheta = azP.to - azP.from;
-    dTheta = ((dTheta + 180) % 360 + 360) % 360 - 180;
-    const theta = azP.from + dTheta * p;
-    const phi   = elP.from + (elP.to - elP.from) * p;
-    const radiusPart = distP.from == null
-      ? 'auto'
-      : `${distP.from + (distP.to - distP.from) * p}m`;
-    const orbitStr = `${theta}deg ${phi}deg ${radiusPart}`;
-
-    const mv = this._mv;
-    this.cameraOrbit = orbitStr; // keep this.cameraOrbit in sync so a post-scrub applyStep isn't a stale no-op
-    if (mv) mv.cameraOrbit = orbitStr;
-
-    // ── Target (numeric columns) ─────────────────────────────────────────────────
-    const tA = _stepTarget(stepA);
-    const tB = _stepTarget(stepB);
-    if (!tA && !tB) {
-      // Both model-centred — nothing to interpolate; leave target at its default.
-      this.cameraTarget = '';
-      if (mv) mv.cameraTarget = 'auto auto auto';
-    } else {
-      let from = tA, to = tB;
-      if (!from || !to) {
-        // One side is model-centred: resolve it to the bounding-box centre, but
-        // only once the model is loaded (getBoundingBoxCenter needs the scene).
-        if (mv && mv.loaded && typeof mv.getBoundingBoxCenter === 'function') {
-          const c = mv.getBoundingBoxCenter();
-          const centre = [c.x, c.y, c.z];
-          from = from || centre;
-          to = to || centre;
-        } else {
-          _jumpModelCameraToGoal(mv); // orbit applied; force the static renderer to it
-          return; // skip the target lerp this frame
-        }
-      }
-      const tx = from[0] + (to[0] - from[0]) * p;
-      const ty = from[1] + (to[1] - from[1]) * p;
-      const tz = from[2] + (to[2] - from[2]) * p;
-      const targetStr = `${tx}m ${ty}m ${tz}m`;
-      this.cameraTarget = targetStr;
-      if (mv) mv.cameraTarget = targetStr;
-    }
-
-    // A static (non-animating) model renders on demand, so with interpolation-decay=0
-    // the camera GOAL is updated but the rendered camera never ticks toward it until
-    // a render is forced. jumpCameraToGoal() forces that snap every frame; smoothness
-    // still comes from the per-frame lerp above (Lenis), exactly like snapIiifToPosition.
-    _jumpModelCameraToGoal(mv);
-  }
-
-  /**
-   * Ease the camera from its current rendered pose to a step's authored pose over
-   * MODEL_CAMERA_DURATION, driven by our own requestAnimationFrame loop.
-   *
-   * Why not model-viewer's interpolation-decay: a guided story plate is a static,
-   * `camera-controls`-less, non-animated <model-viewer>, which does not run a
-   * continuous render loop. Setting cameraOrbit only sets a goal; with nothing
-   * ticking, the eased interpolation never plays — the camera snaps only when an
-   * unrelated render is forced. So we drive the motion explicitly, calling
-   * jumpCameraToGoal() each frame (which both moves the camera AND schedules a
-   * render), exactly like lerpModelCamera does for scroll.
-   *
-   * FROM is the LIVE camera (getCameraOrbit/Target — concrete radians/metres of the
-   * settled previous step). TO is computed from the destination step's numeric
-   * columns (azimuth/elevation/distance/target_x/y/z), NOT read back from
-   * model-viewer — a freshly-set cameraOrbit only reaches model-viewer's goal on
-   * its next tick, so an immediate read-back returns the STALE goal (≈ FROM) and the
-   * ease would have zero motion. Any null column mirrors FROM (no motion on that
-   * axis), matching lerpModelCamera's _lerpPair. Azimuth takes the shortest path.
-   * A new discrete nav (rapid taps) or a scroll/reduced-motion snap cancels the loop.
-   *
-   * @param {Object} step - destination step row (numeric framing columns)
-   * @param {string} fallbackOrbit - the step's resolved orbit string (for the final landing + sync)
-   * @param {string} fallbackTarget - the step's resolved target string ("x y z" / "auto auto auto")
-   */
-  _animateModelCameraDiscrete(step, fallbackOrbit, fallbackTarget) {
-    const mv = this._mv;
-    if (!mv) return;
-    this._cancelDiscreteCameraAnim();
-
-    const DEG = 180 / Math.PI;
-    // FROM: current rendered pose, converted to degrees / metres.
-    const fO = mv.getCameraOrbit();
-    const fT = mv.getCameraTarget();
-    const fromTh = fO.theta * DEG, fromPh = fO.phi * DEG, fromR = fO.radius;
-    const fromT = [fT.x, fT.y, fT.z];
-
-    // TO: from the step's numeric columns; a null column keeps FROM on that axis.
-    const az = _num(step.azimuth), el = _num(step.elevation), dist = _num(step.distance);
-    const toTh = az == null ? fromTh : az;
-    const toPh = el == null ? fromPh : el;
-    const toR  = dist == null ? fromR : dist;
-    const stepT = _stepTarget(step);
-    const toT = stepT || fromT.slice();
-
-    // Shortest-path azimuth: wrap Δθ into [−180°, 180°].
-    let dth = toTh - fromTh;
-    dth = ((dth + 180) % 360 + 360) % 360 - 180;
-
-    const ease = (t) => 1 - Math.pow(1 - t, 3); // ease-out cubic (matches keyboardNav scrollTo)
-    const start = (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    const tick = (now) => {
-      const elapsed = now - start;
-      const p = elapsed >= MODEL_CAMERA_DURATION ? 1 : elapsed / MODEL_CAMERA_DURATION;
-      const e = ease(p);
-      const th = fromTh + dth * e;
-      const ph = fromPh + (toPh - fromPh) * e;
-      const r  = fromR  + (toR  - fromR)  * e;
-      const tx = fromT[0] + (toT[0] - fromT[0]) * e;
-      const ty = fromT[1] + (toT[1] - fromT[1]) * e;
-      const tz = fromT[2] + (toT[2] - fromT[2]) * e;
-      mv.cameraOrbit = `${th}deg ${ph}deg ${r}m`;
-      mv.cameraTarget = `${tx}m ${ty}m ${tz}m`;
-      _jumpModelCameraToGoal(mv);
-      if (p < 1) {
-        this._cameraRAF = requestAnimationFrame(tick);
-      } else {
-        // Land exactly on the authored goal. model-viewer applies a freshly-set
-        // cameraOrbit to its goal on the NEXT tick, so jumpCameraToGoal here is one
-        // tick behind; a second jump next frame settles the rendered camera onto it.
-        mv.cameraOrbit = fallbackOrbit;
-        mv.cameraTarget = fallbackTarget;
-        _jumpModelCameraToGoal(mv);
-        this._cameraRAF = requestAnimationFrame(() => {
-          _jumpModelCameraToGoal(mv);
-          this._cameraRAF = null;
-        });
-      }
-    };
-    this._cameraRAF = requestAnimationFrame(tick);
   }
 
   /**
@@ -378,16 +220,6 @@ export class ModelPlate extends Plate {
       cancelAnimationFrame(this._cameraRAF);
       this._cameraRAF = null;
     }
-  }
-
-  /**
-   * Snap the rendered camera to its goal once the model's first frame loads, so
-   * the plate appears already framed at the authored camera (no opening drift from
-   * model-viewer's default framing). Step-to-step motion is handled separately by
-   * lerp (scroll) and applyStep (boundary).
-   */
-  _settle() {
-    _jumpModelCameraToGoal(this._mv);
   }
 
   /**
@@ -405,115 +237,135 @@ export class ModelPlate extends Plate {
   }
 }
 
-// ── Private helpers ───────────────────────────────────────────────────────────
+
+// Math utils 
+// adopted from https://github.com/yomotsu/camera-controls/blob/dev/src/utils/math-utils.ts#L51
+
+const EPSILON = 1e-5;
+
+export function approxZero(number, error = EPSILON) {
+  return Math.abs(number) < error;
+}
+
+export function approxEquals(a, b, error = EPSILON) {
+  return approxZero(a - b, error);
+}
+
+export function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
 
 /**
- * Force a <model-viewer>'s rendered camera to its current goal.
+ * Gradually moves the current value towards a target value, over a specified time and at a specified velocity
  *
- * Guided story plates carry no `camera-controls`, no auto-rotate and no
- * animation, so model-viewer renders on demand. Assigning cameraOrbit /
- * cameraTarget only updates the GOAL; with interpolation-decay=0 the camera is
- * meant to land instantly, but without a running render loop the on-demand
- * renderer never ticks, so the goal is silently never reached. Calling
- * jumpCameraToGoal() snaps the camera to the goal AND schedules a render.
+ * adapted from https://github.com/yomotsu/camera-controls/blob/c51601107e266097edf6a9caa57bfa9eaa77427c/src/utils/math-utils.ts#L51
+ * https://docs.unity3d.com/ScriptReference/Mathf.SmoothDamp.html
+ * https://github.com/Unity-Technologies/UnityCsReference/blob/a2bdfe9b3c4cd4476f44bf52f848063bfaf7b6b9/Runtime/Export/Math/Mathf.cs#L308
+ */
+function smoothDamp(current, target, currentVelocityRef, smoothTime, maxSpeed = Infinity, deltaTime) {
+
+  // Based on Game Programming Gems 4 Chapter 1.10
+  smoothTime = Math.max(0.0001, smoothTime);
+  const omega = 2 / smoothTime;
+
+  const x = omega * deltaTime;
+  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
+  let change = current - target;
+  const originalTo = target;
+
+  // Clamp maximum speed
+  const maxChange = maxSpeed * smoothTime;
+  change = clamp(change, -maxChange, maxChange);
+  target = current - change;
+
+  const temp = (currentVelocityRef.value + omega * change) * deltaTime;
+  currentVelocityRef.value = (currentVelocityRef.value - omega * temp) * exp;
+  let output = target + (change + temp) * exp;
+
+  // Prevent overshooting
+  if (originalTo - current > 0.0 === output > originalTo) {
+    output = originalTo;
+    currentVelocityRef.value = (output - originalTo) / deltaTime;
+  }
+
+  return output;
+}
+
+
+/**
+ * Gradually changes a vector towards a desired goal over time
  *
- * @param {HTMLElement|null} mv
+ * adapted from https://github.com/yomotsu/camera-controls/blob/c51601107e266097edf6a9caa57bfa9eaa77427c/src/utils/math-utils.ts#L92-L95
+ *  https://docs.unity3d.com/ScriptReference/Vector3.SmoothDamp.html
+ * https://github.com/Unity-Technologies/UnityCsReference/blob/a2bdfe9b3c4cd4476f44bf52f848063bfaf7b6b9/Runtime/Export/Math/Mathf.cs#L308
  */
-function _jumpModelCameraToGoal(mv) {
-  if (mv && typeof mv.jumpCameraToGoal === 'function') mv.jumpCameraToGoal();
-}
+function smoothDampVec3(current, target, currentVelocityRef, smoothTime, maxSpeed = Infinity, deltaTime, out) {
 
-/**
- * Whether the reader prefers reduced motion. Reduced-motion readers get instant
- * camera snaps on discrete navigation instead of an eased interpolation.
- *
- * @returns {boolean}
- */
-function _reduceMotion() {
-  return typeof window !== 'undefined' &&
-    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-}
+  // Based on Game Programming Gems 4 Chapter 1.10
+  smoothTime = Math.max(0.0001, smoothTime);
+  const omega = 2 / smoothTime;
 
-/**
- * Coerce a story-step framing cell to a number. Empty / "nan" / unparseable → null
- * (so the caller can apply a per-component default). Story JSON carries these as
- * strings ("0", "1.45") or null.
- *
- * @param {*} v
- * @returns {number|null}
- */
-function _num(v) {
-  if (v === undefined || v === null) return null;
-  const s = String(v).trim();
-  if (s === '' || s.toLowerCase() === 'nan') return null;
-  const n = parseFloat(s);
-  return Number.isNaN(n) ? null : n;
-}
+  const x = omega * deltaTime;
+  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
 
-/**
- * Resolve a numeric component pair for interpolation. A null endpoint mirrors the
- * other (constant on that axis); both null → the supplied default on each side
- * (or null/null when `dflt` is null, which the distance lerp reads as "auto").
- *
- * @param {number|null} a
- * @param {number|null} b
- * @param {number|null} dflt
- * @returns {{ from: number|null, to: number|null }}
- */
-function _lerpPair(a, b, dflt) {
-  if (a == null && b == null) return { from: dflt, to: dflt };
-  return { from: a == null ? b : a, to: b == null ? a : b };
-}
+  let targetX = target.x;
+  let targetY = target.y; 
+  let targetZ = target.z;
 
-/**
- * Read a step's look-at target columns into [x, y, z] metres, or null
- * (model-centred) when any axis is empty.
- */
-function _stepTarget(step) {
-  const x = _num(step.target_x);
-  const y = _num(step.target_y);
-  const z = _num(step.target_z);
-  if (x == null || y == null || z == null) return null;
-  return [x, y, z];
-}
+  let changeX = current.x - targetX;
+  let changeY = current.y - targetY;
+  let changeZ = current.z - targetZ;
 
-/**
- * Read a step's orbit columns into [azimuth, elevation, distance]; an empty value
- * defaults to azimuth 0, elevation 75, distance 'auto'.
- */
-function _stepOrbit(step) {
-  const az = _num(step.azimuth) ?? 0;
-  const el = _num(step.elevation) ?? 75;
-  const dist = _num(step.distance) ?? 'auto';
-  return [az, el, dist];
-}
+  const originalToX = targetX;
+  const originalToY = targetY;
+  const originalToZ = targetZ;
 
-/**
- * Build a model-viewer camera-orbit string from [azimuth, elevation, distance].
- */
-function _getOrbitString(orbit) {
-  const [az, el, dist] = orbit;
-  return `${az}deg ${el}deg ${dist === 'auto' ? 'auto' : dist + 'm'}`;
-}
+  // Clamp maximum speed
+  const maxChange = maxSpeed * smoothTime;
 
-/**
- * Build a model-viewer camera-target string from [x, y, z] metres, or '' when
- * the target is null (model-centred).
- */
-function _getTargetString(target) {
-  return target ? `${target[0]}m ${target[1]}m ${target[2]}m` : '';
-}
+  const maxChangeSq = maxChange * maxChange;
+  const magnitudeSq = changeX * changeX + changeY * changeY + changeZ * changeZ;
 
-/**
- * Convert a story step's numeric framing columns (azimuth, elevation, distance,
- * target_x/y/z) into the model-viewer native { orbit, target } strings the player
- * consumes. The numeric columns are the authoring/storage form; these strings are
- * the internal model-viewer boundary. Exported for the orchestrator's discrete
- * updates and plate initialisation.
- *
- * @param {Object} step
- * @returns {{ orbit: string, target: string }}
- */
-export function stepCameraStrings(step) {
-  return { orbit: _stepToOrbitString(step), target: _stepToTargetString(step) };
+  if (magnitudeSq > maxChangeSq) {
+    const magnitude = Math.sqrt(magnitudeSq);
+    changeX = changeX / magnitude * maxChange;
+    changeY = changeY / magnitude * maxChange;
+    changeZ = changeZ / magnitude * maxChange;
+  }
+
+  targetX = current.x - changeX;
+  targetY = current.y - changeY;
+  targetZ = current.z - changeZ;
+
+  const tempX = (currentVelocityRef.x + omega * changeX) * deltaTime;
+  const tempY = (currentVelocityRef.y + omega * changeY) * deltaTime;
+  const tempZ = (currentVelocityRef.z + omega * changeZ) * deltaTime;
+
+  currentVelocityRef.x = (currentVelocityRef.x - omega * tempX) * exp;
+  currentVelocityRef.y = (currentVelocityRef.y - omega * tempY) * exp;
+  currentVelocityRef.z = (currentVelocityRef.z - omega * tempZ) * exp;
+
+  out.x = targetX + (changeX + tempX) * exp;
+  out.y = targetY + (changeY + tempY) * exp;
+  out.z = targetZ + (changeZ + tempZ) * exp;
+
+  // Prevent overshooting
+  const origMinusCurrentX = originalToX - current.x;
+  const origMinusCurrentY = originalToY - current.y;
+  const origMinusCurrentZ = originalToZ - current.z;
+  const outMinusOrigX = out.x - originalToX;
+  const outMinusOrigY = out.y - originalToY;
+  const outMinusOrigZ = out.z - originalToZ;
+
+  if (origMinusCurrentX * outMinusOrigX + origMinusCurrentY * outMinusOrigY + origMinusCurrentZ * outMinusOrigZ > 0) {
+    out.x = originalToX;
+    out.y = originalToY;
+    out.z = originalToZ;
+  
+    currentVelocityRef.x = (out.x - originalToX) / deltaTime;
+    currentVelocityRef.y = (out.y - originalToY) / deltaTime;
+    currentVelocityRef.z = (out.z - originalToZ) / deltaTime;
+  }
+  
+  return out;
 }

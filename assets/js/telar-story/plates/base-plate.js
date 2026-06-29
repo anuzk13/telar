@@ -12,23 +12,25 @@ export class Plate {
    * @param {string} objectId
    * @param {number} sceneIndex
    * @param {number} zIndex
+   * @param {Object} initialStep
    */
-  constructor(container, objectId, sceneIndex, zIndex) {
+  constructor(container, objectId, sceneIndex, zIndex, initialStep) {
     this.container = container;
     this.objectId = objectId;
     this.sceneIndex = sceneIndex;
     this.zIndex = zIndex;
+    this._currentStep = initialStep;
   }
 
   /**
-   * Bring the plate on-screen as the active scene.
+   * Bring the plate on-screen as the active scene and frame it to the given step.
    */
-  activate() {
+  activate(step) {
     this.ensurePlayer();
     this.container.style.zIndex = this.zIndex;
     this.container.style.transform = 'translateY(0)';
     this.container.classList.add('is-active');
-    this.onActivate();
+    this.moveStep(step, false);
   }
 
   /**
@@ -62,22 +64,19 @@ export class Plate {
 
   /**
    * Per-frame interpolation during scroll scrubbing.
-   * No-op by default IIIF and model implement it.
    *
-   * @param {number} _progress - 0..1 within the current step pair.
-   * @param {Object} _fromStep
-   * @param {Object} _toStep
+   * @param {number} progress - 0..1 with respect to previous step or initial pose
+   * @param {Object} step
    */
-  lerp(_progress, _fromStep, _toStep) {}
+  lerpStep(progress, step) {}
 
   /**
-   * Apply a step's view discretely 
-   * video/audio: clip times). No-op by default.
+   * Apply a step's view discretely with predefined animation
    *
-   * @param {Object} _step - the destination step data
-   * @param {boolean} [_animate=false]
+   * @param {Object} step - the destination step data
+   * @param {boolean} [animate=false]
    */
-  applyStep(_step, _animate = false) {}
+  moveStep(step, animate = false) {}
 
   /** @returns {boolean} whether the player currently exists. */
   hasPlayer() { return false; }
@@ -87,9 +86,6 @@ export class Plate {
 
   /** Tear down the player to release resources */
   destroyPlayer() {}
-
-  /** Apply this step's layout / camera once the plate is active. */
-  onActivate() {}
 
   /** Action after deactivation (i.e freeze video frame). */
   onDeactivate() {}
