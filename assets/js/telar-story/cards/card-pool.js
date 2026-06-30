@@ -15,6 +15,7 @@
  */
 
 import { state } from '../state.js';
+import { onViewportResize } from '../layout-mode.js';
 import { buildScenes, getSceneIndex } from './card-pool-builder.js';
 import { ModelPlate } from '../plates/model-plate.js';
 import { TextCard } from './text-card.js';
@@ -57,7 +58,13 @@ export function initPool(storyData, config) {
   for (const idx in state.titleCards) _cards.set(+idx, new TextCard(state.titleCards[idx]));
 
   // activate is not called for the title, activate the first scene
-  setWindow(getSceneIndex(0)); 
+  setWindow(getSceneIndex(0));
+  
+  onViewportResize(resizeLivePlates);
+}
+
+function resizeLivePlates() {
+  for (const i of _live) state.scenes[i].plate.resize();
 }
 
 /** Load the viewer scenes in the [BEHIND, AHEAD] window around `centerIndex`; unload the rest. */

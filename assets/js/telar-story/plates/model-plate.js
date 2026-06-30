@@ -6,9 +6,9 @@
  */
 
 import { Plate } from './base-plate.js';
-import { state } from './../state.js';
 import { getBasePath } from './../utils.js';
-import { createRenderer, fitCameraToModel, setupNeutralEnvironment } from './../../3d-helpers.js';
+import { getLayoutMode } from './../layout-mode.js';
+import { createRenderer, fitCameraToModel, setupNeutralEnvironment, resizeRendererToContainer } from './../../3d-helpers.js';
 
 
 /** Load the three.js UMD bundle once (THREE + GLTFLoader + RoomEnvironment). */
@@ -98,13 +98,20 @@ export class ModelPlate extends Plate {
     this._renderer.render(this._scene, this._camera);
   }
 
+  resize() {
+    if (!this._renderer) return; 
+    resizeRendererToContainer(this._renderer, this._camera, this.container);
+    this._applyViewOffset();
+    this._render();
+  }
+
   /**
    * Apply the view offset based on the current layout mode so the model bleeds behind the card view
    */
   _applyViewOffset() {
     const w = this.container.clientWidth;
     const h = this.container.clientHeight;
-    if (state.layoutMode === 'vertical') {
+    if (getLayoutMode() === 'vertical') {
       this._camera.setViewOffset(w, h, 0, 0.2 * h, w, h);
     } else {
       this._camera.setViewOffset(w, h, -0.2 * w, 0, w, h);

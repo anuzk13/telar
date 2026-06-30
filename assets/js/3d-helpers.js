@@ -18,6 +18,13 @@ export function createRenderer(container) {
   return renderer;
 }
 
+export function resizeRendererToContainer(renderer, camera, container) {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+}
+
 export function getDistanceToFitSphere(camera, radius) {
   // https://stackoverflow.com/a/44849975
   const vFOV = camera.getEffectiveFOV() * Math.PI / 180;

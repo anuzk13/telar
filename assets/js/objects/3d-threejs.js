@@ -6,7 +6,7 @@
  * 
  */
 
-import { fitCameraToModel, setupNeutralEnvironment } from '../3d-helpers.js';
+import { fitCameraToModel, setupNeutralEnvironment, resizeRendererToContainer } from '../3d-helpers.js';
 
 (function () {
 
@@ -100,9 +100,8 @@ import { fitCameraToModel, setupNeutralEnvironment } from '../3d-helpers.js';
   }
 
   function onWindowResize() {
-    camera.aspect = container.clientWidth / container.clientHeight;
+    resizeRendererToContainer( renderer, camera, container );
     camera.updateProjectionMatrix();
-    renderer.setSize( container.clientWidth, container.clientHeight );
     render();
   }
 

@@ -61,9 +61,12 @@ export class Plate {
   /** Per-frame scroll interpolation between two steps. */
   scroll(progress, stepA, stepB) {}
 
+  /** React to a viewport resize. */
+  resize() {}
+
   /** Build the player (libraries are loaded by now). */
   _build() {}
-  
+
   /** Free the player + GPU. */
   _teardown() {}
   
