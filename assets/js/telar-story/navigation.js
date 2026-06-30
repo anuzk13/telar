@@ -29,7 +29,7 @@
  */
 
 import { state, MOBILE_NAV_COOLDOWN } from './state.js';
-import { activateCard } from './cards/card-pool.js';
+import { activateCard, returnToIntro } from './cards/card-pool.js';
 import { advanceToStep, keyboardNav } from './scroll-engine.js';
 import { writeHash } from './deep-link.js';
 import { initializeLoadingShimmer, showViewerSkeletonState } from './viewer.js';
@@ -77,22 +77,7 @@ export function goToStep(newIndex, direction = 'forward') {
       intro.style.transition = 'transform 0.5s ease-out';
       intro.style.transform = 'translateY(0)';
     }
-    // Slide step 0's text card back down
-    const firstCard = state.textCards?.[0];
-    if (firstCard) {
-      firstCard.classList.remove('is-active', 'is-stacked');
-      const rot  = parseFloat(firstCard.dataset.messinessRot  || 0);
-      const offX = parseFloat(firstCard.dataset.messinessOffX || 0);
-      const offY = parseFloat(firstCard.dataset.messinessOffY || 0);
-      firstCard.style.transform = `translateY(100vh) rotate(${rot}deg) translate(${offX}px, ${offY}px)`;
-    }
-    // Slide first viewer plate back down
-    const firstObject = window.storyData?.firstObject;
-    if (firstObject && state.viewerPlates?.[firstObject]) {
-      const plate = state.viewerPlates[firstObject];
-      plate.style.transform = 'translateY(100%)';
-      plate.classList.remove('is-active');
-    }
+    returnToIntro();
     // Reset object run tracking
     state.currentObjectRun = { objectId: null, runPosition: 0 };
     // Hide step counter and credit overlay on intro

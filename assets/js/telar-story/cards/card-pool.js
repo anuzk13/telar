@@ -120,6 +120,14 @@ export function activateCard(index, direction) {
   centerCard(index, direction);
 }
 
+/** Send the centred viewer + card back and clear the centred indices. */
+export function returnToIntro() {
+  state.scenes[_current]?.plate?.sendBack();
+  _cards.get(_currentStep)?.sendBack('backward');
+  _current = -1;
+  _currentStep = -1;
+}
+
 /** scroll-engine per frame — slide the next card in proportionally to scroll. */
 export function setCardProgress(stepIndex, progress) {
   if (progress < 0.001) return;
