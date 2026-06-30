@@ -1,17 +1,5 @@
 /**
- * Telar Story — card pool (orchestrator)
- *
- * Two axes:
- *   loaded / unloaded   ← the pool's job (files + GPU + budget)
- *   centred / back      ← the visual position (scroll / nav)
- *
- * PLATE (one viewer, permanent — these methods live in the plate):
- *   load()                   build player; loads its own libs (three.js) + file -> idempotent
- *   unload()                 free the player + GPU
- *   center(step)             move to front, frame to step
- *   sendBack()               slide off / behind
- *   goToStep(step, animate)  move camera to a step
- *   scroll(progress, a, b)   scroll interpolation between two steps
+ * Telar Story — card pool (orchestrator) 
  */
 
 import { state } from '../state.js';
@@ -26,9 +14,9 @@ const PLATE_TYPES = {
 };
 
 const AHEAD = 2, BEHIND = 1; // viewer scenes kept loaded around the centred one
-let _current = -1;           // centred scene index
-let _currentStep = -1;       // centred step index (text/title card)
-const _live = new Set();     // scene indices whose player is loaded
+let _currentSceneIdx = -1;
+let _currentStepIdx = -1;
+const _liveSceneIdxs = new Set();     // scene indices whose player is loaded
 const _cards = new Map();    // stepIndex → TextCard
 
 /** Whether this scene's type has a viewer plate */
@@ -64,7 +52,7 @@ export function initPool(storyData, config) {
 }
 
 function resizeLivePlates() {
-  for (const i of _live) state.scenes[i].plate.resize();
+  for (const i of _liveSceneIdxs) state.scenes[i].plate.resize();
 }
 
 /** Load the viewer scenes in the [BEHIND, AHEAD] window around `centerIndex`; unload the rest. */
@@ -74,22 +62,22 @@ function setWindow(centerIndex) {
     const scene = state.scenes[centerIndex + d];
     if (!scene?.plate) continue;
     window.add(scene.index);
-    if (!_live.has(scene.index)) { scene.plate.load(); _live.add(scene.index); }
+    if (!_liveSceneIdxs.has(scene.index)) { scene.plate.load(); _liveSceneIdxs.add(scene.index); }
   }
-  for (const i of [..._live]) {
-    if (!window.has(i)) { state.scenes[i].plate.unload(); _live.delete(i); }
+  for (const i of [..._liveSceneIdxs]) {
+    if (!window.has(i)) { state.scenes[i].plate.unload(); _liveSceneIdxs.delete(i); }
   }
 }
 
 /** bring a viewer to the front: load its window, center it, send the previous back. */
 function centerViewer(scene, step, direction) {
-  if (scene.index === _current) {              // same scene, new step => move the camera
+  if (scene.index === _currentSceneIdx) {              // same scene, new step => move the camera
     scene.plate?.goToStep(step, !state.scrollDriven);
     return;
   }
 
-  const prevScene = state.scenes[_current];
-  _current = scene.index;
+  const prevScene = state.scenes[_currentSceneIdx];
+  _currentSceneIdx = scene.index;
 
   setWindow(scene.index);
   scene.plate?.center(step);
@@ -98,10 +86,10 @@ function centerViewer(scene, step, direction) {
 
 /** center the step's text/title card; send the previously-centred one back. */
 function centerCard(stepIndex, direction) {
-  if (stepIndex === _currentStep) return;
-  _cards.get(_currentStep)?.sendBack(direction);
+  if (stepIndex === _currentStepIdx) return;
+  _cards.get(_currentStepIdx)?.sendBack(direction);
   _cards.get(stepIndex)?.center();
-  _currentStep = stepIndex;
+  _currentStepIdx = stepIndex;
 }
 
 /** scroll the centred plate between two steps. Caller ensures hasPlate + same scene. */
@@ -122,10 +110,10 @@ export function activateCard(index, direction) {
 
 /** Send the centred viewer + card back and clear the centred indices. */
 export function returnToIntro() {
-  state.scenes[_current]?.plate?.sendBack();
-  _cards.get(_currentStep)?.sendBack('backward');
-  _current = -1;
-  _currentStep = -1;
+  state.scenes[_currentSceneIdx]?.plate?.sendBack();
+  _cards.get(_currentStepIdx)?.sendBack('backward');
+  _currentSceneIdx = -1;
+  _currentStepIdx = -1;
 }
 
 /** scroll-engine per frame — slide the next card in proportionally to scroll. */
