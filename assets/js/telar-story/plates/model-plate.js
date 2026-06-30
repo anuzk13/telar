@@ -11,33 +11,46 @@ import { getBasePath } from './../utils.js';
 import { createRenderer, fitCameraToModel, setupNeutralEnvironment } from './../../3d-helpers.js';
 
 
-/** Duration (ms) of the camera move on mobile tap, nav button and deep-link */
-const MODEL_CAMERA_DURATION = 600;
+/** Load the three.js UMD bundle once (THREE + GLTFLoader + RoomEnvironment). */
+let _threePromise;
+function loadThree() {
+  if (_threePromise) return _threePromise;
+  _threePromise = new Promise((resolve, reject) => {
+    if (window.THREE) return resolve();
+    const s = document.createElement('script');
+    s.src = `${getBasePath()}/assets/vendor/umd_threejs.js`;
+    s.async = true;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('three.js failed to load'));
+    document.head.appendChild(s);
+  });
+  return _threePromise;
+}
+
 
 export class ModelPlate extends Plate {
+
+  static containerClass = 'model-plate';
+  static deps = loadThree;
+
   constructor(container, objectId, sceneIndex, zIndex, initialStep) {
     super(container, objectId, sceneIndex, zIndex, initialStep);
-    this._currentPose = null;
     this._renderer = null;
     this._scene = null;
     this._camera = null;
     this._model = null;
-    this._autoFraming = null;   // bounding sphere location and framing distance calculated on load
-    this._cameraRAF = null;
+    this._autoFraming = null;     // bounding sphere location and framing distance
+    this._cameraControl = null;
   }
 
-  hasPlayer() {
-    return !!this._renderer;
-  }
-
-  createPlayer() {
+  /** Build renderer + load the GLB. Resolves when the model's first frame is ready. */
+  _build() {
     const THREE = window.THREE;
     const GLTFLoader = window.GLTFLoader;
 
     const ext = window.modelObjects[this.objectId];
     const url = `${getBasePath()}/telar-content/objects/${this.objectId}.${ext}`;
 
-    this.container.style.zIndex = this.zIndex;
     this.container.dataset.loading = 'true';
 
     const renderer = createRenderer(this.container);
@@ -56,24 +69,29 @@ export class ModelPlate extends Plate {
     this._scene = scene;
     this._camera = camera;
 
-    new GLTFLoader().load(
-      url,
-      (gltf) => {
-        if (!this._renderer) return;   // destroyPlayer() was called mid load
-        this._model = gltf.scene;
-        scene.add(gltf.scene);
-        this._autoFraming = fitCameraToModel(camera, gltf.scene);
-        this._applyViewOffset();
-        delete this.container.dataset.loading;
-        this.moveStep(this._currentStep, false);
-        this._render();
-      },
-      undefined,
-      () => {
-        delete this.container.dataset.loading;
-        this._injectModelError();
-      }
-    );
+    return new Promise((resolve, reject) => {
+      new GLTFLoader().load(
+        url,
+        (gltf) => {
+          if (!this._renderer) return;   // unloaded mid-load
+          this._model = gltf.scene;
+          scene.add(gltf.scene);
+          this._autoFraming = fitCameraToModel(camera, gltf.scene);
+          this._cameraControl = new CameraControl(camera, () => this._render());
+          this._applyViewOffset();
+          delete this.container.dataset.loading;
+          this.goToStep(this._currentStep, false);
+          this._render();
+          resolve();
+        },
+        undefined,
+        (err) => {
+          delete this.container.dataset.loading;
+          this._injectModelError();
+          reject(err);
+        }
+      );
+    });
   }
 
   _render() {
@@ -93,11 +111,9 @@ export class ModelPlate extends Plate {
     }
   }
 
-  /**
-   * Destroy the model player, releasing its GPU resources and WebGL context.
-   */
-  destroyPlayer() {
-    this._cancelDiscreteCameraAnim();
+  /** Free the renderer, GPU resources and WebGL context. */
+  _teardown() {
+    this._cameraControl?.stopAnimation();
 
     // threejs.org/manual/#en/how-to-dispose-of-objects
     // TODO: look into a singleton that implements a shared renderer across plates 
@@ -125,25 +141,27 @@ export class ModelPlate extends Plate {
     this._camera = null;
     this._model = null;
     this._autoFraming = null;
+    this._cameraControl = null;
   }
 
-  /**
-   * Deactivate a model card plate
-   */
-  onDeactivate() {
-    this._cancelDiscreteCameraAnim();
+  /** Stop the camera animation when sent back. */
+  onSendBack() {
+    this._cameraControl?.stopAnimation();
   }
 
-  /**
-   * Move to a step pose eased on discrete navigation, snapped otherwise.
-   */
-  moveStep(step, animate = false) {
+  /** Move to a step pose: eased on discrete navigation, snapped otherwise. */
+  goToStep(step, animate = false) {
     this._currentStep = step;
-    if (!this._model) return;
+    if (!this._cameraControl) return;
     const pose = this._resolvePose(step);
-    if (animate) this._easeCamera(pose);
-    else this._snapCamera(pose);
-    this._currentPose = pose;
+    if (animate) this._cameraControl.ease(pose);
+    else this._cameraControl.snap(pose);
+  }
+
+  /** Interpolate the camera between two steps by scroll progress (no animation). */
+  scroll(progress, stepA, stepB) {
+    if (!this._cameraControl) return;
+    this._cameraControl.lerp(this._resolvePose(stepA), this._resolvePose(stepB), progress);
   }
 
   /**
@@ -162,9 +180,9 @@ export class ModelPlate extends Plate {
    * default to 0° / 75° / the model's ideal framing distance.
    */
   _stepOrbit(step) {
-    const az = _num(step.azimuth) ?? 0;
-    const el = _num(step.elevation) ?? 75;
-    const dist = _num(step.distance) ?? this._autoFraming.distance;
+    const az = this._num(step.azimuth) ?? 0;
+    const el = this._num(step.elevation) ?? 75;
+    const dist = this._num(step.distance) ?? this._autoFraming.distance;
     return [az, el, dist];
   }
 
@@ -173,53 +191,18 @@ export class ModelPlate extends Plate {
    * the model's bounding-sphere centre.
    */
   _stepTarget(step) {
-    const x = _num(step.target_x) ?? this._autoFraming.target[0];
-    const y = _num(step.target_y) ?? this._autoFraming.target[1];
-    const z = _num(step.target_z) ?? this._autoFraming.target[2];
+    const x = this._num(step.target_x) ?? this._autoFraming.target[0];
+    const y = this._num(step.target_y) ?? this._autoFraming.target[1];
+    const z = this._num(step.target_z) ?? this._autoFraming.target[2];
     return [x, y, z];
   }
 
   /**
-   * Orbit the camera to a numeric pose (azimuth/elevation/distance around target)
-   * and render.
+   * Parse story value as number or null
    */
-  _applyPose({ azimuth, elevation, distance, target }) {
-    const THREE = window.THREE;
-    const offset = new THREE.Vector3().setFromSphericalCoords(
-      distance,
-      THREE.MathUtils.degToRad(elevation),
-      THREE.MathUtils.degToRad(azimuth)
-    );
-    this._camera.position.set(target[0], target[1], target[2]).add(offset);
-    this._camera.lookAt(target[0], target[1], target[2]);
-    this._render();
-  }
-
-  /** Land a new authored pose instantly. */
-  _snapCamera(pose) {
-    this._cancelDiscreteCameraAnim();
-    this._applyPose(pose);
-  }
-
-  /**
-   * Ease the camera from its current pose to `pose` 
-   */
-  _easeCamera(pose) {
-    
-  }
-
-  _lerp (poseA, poseB, t) {
-
-  }
-
-  /**
-   * Cancel any in-flight discrete camera animation on this plate.
-   */
-  _cancelDiscreteCameraAnim() {
-    if (this._cameraRAF) {
-      cancelAnimationFrame(this._cameraRAF);
-      this._cameraRAF = null;
-    }
+  _num(v) {
+    const n = parseFloat(v);
+    return Number.isNaN(n) ? null : n;
   }
 
   /**
@@ -238,134 +221,79 @@ export class ModelPlate extends Plate {
 }
 
 
-// Math utils 
-// adopted from https://github.com/yomotsu/camera-controls/blob/dev/src/utils/math-utils.ts#L51
-
-const EPSILON = 1e-5;
-
-export function approxZero(number, error = EPSILON) {
-  return Math.abs(number) < error;
-}
-
-export function approxEquals(a, b, error = EPSILON) {
-  return approxZero(a - b, error);
-}
-
-export function clamp(value, min, max) {
-  return Math.max(min, Math.min(max, value));
-}
+/** Duration (ms) of an eased camera move. */
+const EASE_DURATION = 600;
 
 /**
- * Gradually moves the current value towards a target value, over a specified time and at a specified velocity
- *
- * adapted from https://github.com/yomotsu/camera-controls/blob/c51601107e266097edf6a9caa57bfa9eaa77427c/src/utils/math-utils.ts#L51
- * https://docs.unity3d.com/ScriptReference/Mathf.SmoothDamp.html
- * https://github.com/Unity-Technologies/UnityCsReference/blob/a2bdfe9b3c4cd4476f44bf52f848063bfaf7b6b9/Runtime/Export/Math/Mathf.cs#L308
+ * Drives a three.js camera between framing poses.
  */
-function smoothDamp(current, target, currentVelocityRef, smoothTime, maxSpeed = Infinity, deltaTime) {
-
-  // Based on Game Programming Gems 4 Chapter 1.10
-  smoothTime = Math.max(0.0001, smoothTime);
-  const omega = 2 / smoothTime;
-
-  const x = omega * deltaTime;
-  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
-  let change = current - target;
-  const originalTo = target;
-
-  // Clamp maximum speed
-  const maxChange = maxSpeed * smoothTime;
-  change = clamp(change, -maxChange, maxChange);
-  target = current - change;
-
-  const temp = (currentVelocityRef.value + omega * change) * deltaTime;
-  currentVelocityRef.value = (currentVelocityRef.value - omega * temp) * exp;
-  let output = target + (change + temp) * exp;
-
-  // Prevent overshooting
-  if (originalTo - current > 0.0 === output > originalTo) {
-    output = originalTo;
-    currentVelocityRef.value = (output - originalTo) / deltaTime;
+class CameraControl {
+  constructor(camera, onChange) {
+    this._camera = camera;
+    this._onChange = onChange;
+    this._pose = null;
+    this._animFrame = null; 
   }
 
-  return output;
-}
-
-
-/**
- * Gradually changes a vector towards a desired goal over time
- *
- * adapted from https://github.com/yomotsu/camera-controls/blob/c51601107e266097edf6a9caa57bfa9eaa77427c/src/utils/math-utils.ts#L92-L95
- *  https://docs.unity3d.com/ScriptReference/Vector3.SmoothDamp.html
- * https://github.com/Unity-Technologies/UnityCsReference/blob/a2bdfe9b3c4cd4476f44bf52f848063bfaf7b6b9/Runtime/Export/Math/Mathf.cs#L308
- */
-function smoothDampVec3(current, target, currentVelocityRef, smoothTime, maxSpeed = Infinity, deltaTime, out) {
-
-  // Based on Game Programming Gems 4 Chapter 1.10
-  smoothTime = Math.max(0.0001, smoothTime);
-  const omega = 2 / smoothTime;
-
-  const x = omega * deltaTime;
-  const exp = 1 / (1 + x + 0.48 * x * x + 0.235 * x * x * x);
-
-  let targetX = target.x;
-  let targetY = target.y; 
-  let targetZ = target.z;
-
-  let changeX = current.x - targetX;
-  let changeY = current.y - targetY;
-  let changeZ = current.z - targetZ;
-
-  const originalToX = targetX;
-  const originalToY = targetY;
-  const originalToZ = targetZ;
-
-  // Clamp maximum speed
-  const maxChange = maxSpeed * smoothTime;
-
-  const maxChangeSq = maxChange * maxChange;
-  const magnitudeSq = changeX * changeX + changeY * changeY + changeZ * changeZ;
-
-  if (magnitudeSq > maxChangeSq) {
-    const magnitude = Math.sqrt(magnitudeSq);
-    changeX = changeX / magnitude * maxChange;
-    changeY = changeY / magnitude * maxChange;
-    changeZ = changeZ / magnitude * maxChange;
+  /** 
+   * Fix a pose
+   **/
+  snap(pose) {
+    this.stopAnimation();
+    this._positionCamera(pose);
   }
 
-  targetX = current.x - changeX;
-  targetY = current.y - changeY;
-  targetZ = current.z - changeZ;
-
-  const tempX = (currentVelocityRef.x + omega * changeX) * deltaTime;
-  const tempY = (currentVelocityRef.y + omega * changeY) * deltaTime;
-  const tempZ = (currentVelocityRef.z + omega * changeZ) * deltaTime;
-
-  currentVelocityRef.x = (currentVelocityRef.x - omega * tempX) * exp;
-  currentVelocityRef.y = (currentVelocityRef.y - omega * tempY) * exp;
-  currentVelocityRef.z = (currentVelocityRef.z - omega * tempZ) * exp;
-
-  out.x = targetX + (changeX + tempX) * exp;
-  out.y = targetY + (changeY + tempY) * exp;
-  out.z = targetZ + (changeZ + tempZ) * exp;
-
-  // Prevent overshooting
-  const origMinusCurrentX = originalToX - current.x;
-  const origMinusCurrentY = originalToY - current.y;
-  const origMinusCurrentZ = originalToZ - current.z;
-  const outMinusOrigX = out.x - originalToX;
-  const outMinusOrigY = out.y - originalToY;
-  const outMinusOrigZ = out.z - originalToZ;
-
-  if (origMinusCurrentX * outMinusOrigX + origMinusCurrentY * outMinusOrigY + origMinusCurrentZ * outMinusOrigZ > 0) {
-    out.x = originalToX;
-    out.y = originalToY;
-    out.z = originalToZ;
-  
-    currentVelocityRef.x = (out.x - originalToX) / deltaTime;
-    currentVelocityRef.y = (out.y - originalToY) / deltaTime;
-    currentVelocityRef.z = (out.z - originalToZ) / deltaTime;
+  /** 
+   * Lerp between two poses over t in [0, 1] and show the intermediate pose.
+   **/
+  lerp(a, b, t) {
+    this._positionCamera({
+      azimuth:   a.azimuth   + (b.azimuth   - a.azimuth)   * t,
+      elevation: a.elevation + (b.elevation - a.elevation) * t,
+      distance:  a.distance  + (b.distance  - a.distance)  * t,
+      target: [
+        a.target[0] + (b.target[0] - a.target[0]) * t,
+        a.target[1] + (b.target[1] - a.target[1]) * t,
+        a.target[2] + (b.target[2] - a.target[2]) * t,
+      ],
+    });
   }
-  
-  return out;
+
+  /** 
+   * Animate to a specific pose
+   **/
+  ease(to) {
+    this.stopAnimation();
+    const from = this._pose;
+    const start = performance.now();
+    const tick = (now) => {
+      const t = Math.min((now - start) / EASE_DURATION, 1);
+      this.lerp(from, to, t);
+      this._animFrame = t < 1 ? requestAnimationFrame(tick) : null;
+    };
+    this._animFrame = requestAnimationFrame(tick);
+  }
+
+  stopAnimation() {
+    if (this._animFrame) {
+      cancelAnimationFrame(this._animFrame);
+      this._animFrame = null;
+    }
+  }
+
+  /** 
+   * Position the camera from a pose around its target
+   **/
+  _positionCamera(pose) {
+    const THREE = window.THREE;
+    const offset = new THREE.Vector3().setFromSphericalCoords(
+      pose.distance,
+      THREE.MathUtils.degToRad(pose.elevation),
+      THREE.MathUtils.degToRad(pose.azimuth)
+    );
+    this._camera.position.set(pose.target[0], pose.target[1], pose.target[2]).add(offset);
+    this._camera.lookAt(pose.target[0], pose.target[1], pose.target[2]);
+    this._pose = pose;
+    this._onChange();
+  }
 }

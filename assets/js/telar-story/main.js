@@ -39,7 +39,7 @@ import {
   initializeCredits,
   getManifestUrl,
 } from './viewer.js';
-import { initCardPool, activateCard } from './card-pool.js';
+import { initCardPool, activateCard } from './cards/card-pool.js';
 import { IiifViewer } from './iiif-viewer.js';
 
 // Expose the IIIF wrapper class as a window global so inline scripts in

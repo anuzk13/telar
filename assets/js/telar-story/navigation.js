@@ -29,7 +29,7 @@
  */
 
 import { state, MOBILE_NAV_COOLDOWN } from './state.js';
-import { activateCard } from './card-pool.js';
+import { activateCard } from './cards/card-pool.js';
 import { advanceToStep, keyboardNav } from './scroll-engine.js';
 import { writeHash } from './deep-link.js';
 import { initializeLoadingShimmer, showViewerSkeletonState } from './viewer.js';

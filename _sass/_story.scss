@@ -210,18 +210,12 @@
   background: #fff url('../img/background-gris.svg') repeat;
   background-size: 20px auto;
 
+  // Canvas fills the plate; the model is framed into the uncovered region by the
+  // renderer viewport (model-plate.js), not by CSS. Guided playback: drag/wheel
+  // belong to the Lenis scroll engine, so the canvas takes no pointer events.
   .model-instance {
-    // Absolutely positioned: model-card.js:frameModelInRegion sizes the element
-    // to the uncovered region (the screen area the text card does not cover) so
-    // the model centres beside/above the card instead of behind it — the 3D
-    // analogue of the IIIF overlay-aware centring. `inset: 0` is only the
-    // pre-framing fallback (JS overrides left/top/width/height on append).
     position: absolute;
     inset: 0;
-    // Guided story playback: the camera is authored, so the reader must not be
-    // able to grab the model (the drag/wheel belongs to the Lenis scroll
-    // engine). model-card.js omits `camera-controls`; this is belt-and-braces.
-    --poster-color: transparent;
     pointer-events: none;
   }
 }

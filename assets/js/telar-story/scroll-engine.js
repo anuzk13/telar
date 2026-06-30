@@ -45,13 +45,11 @@ import Lenis from 'lenis';
 import Snap from 'lenis/snap';
 import { state } from './state.js';
 import { onViewportResize } from './layout-mode.js';
-import { activateCard, setCardProgress } from './card-pool.js';
+import { activateCard, setCardProgress, lerpModelCamera } from './cards/card-pool.js';
 import { writeHash } from './deep-link.js';
 import { goToStep, updateViewerInfo } from './navigation.js';
 import { initKeyboardNavigation } from './navigation.js';
 import { initializeLoadingShimmer } from './viewer.js';
-import { lerpIiifPosition } from './iiif-card.js';
-import { lerpModelCamera } from './model-card.js';
 
 // ── Module-level references ───────────────────────────────────────────────────
 
@@ -392,12 +390,7 @@ export function updateScrollPosition(position) {
 
   // Per-frame scrub updates
   setCardProgress(stepIndex, progress);
-  // Feed the FILTERED steps (state.stepsData) — stepIndex is a filtered-space
-  // index (it drives state.stepToScene), so the unfiltered window.storyData
-  // .steps would mis-index on stories that contain metadata rows.
-  lerpIiifPosition(stepIndex, progress, state.stepsData || []);
-  // Per-frame 3D camera interpolation — the model analogue of lerpIiifPosition.
-  // No-ops for non-model scenes and different-object pairs.
+  // Per-frame 3D camera interpolation. No-ops for non-model / cross-scene pairs.
   lerpModelCamera(stepIndex, progress, state.stepsData || []);
 
   // Integer boundary crossings — activateCard
