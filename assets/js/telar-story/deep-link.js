@@ -29,7 +29,7 @@
  */
 
 import { state } from './state.js';
-import { activateCard } from './card-pool.js';
+import { activateCard } from './cards/card-pool.js';
 import { goToStep } from './navigation.js';
 import { openPanel } from './panels.js';
 

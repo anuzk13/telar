@@ -7,6 +7,24 @@
  *
  * adapted from https://github.com/yomotsu/camera-controls/blob/dev/src/CameraControls.ts#L2447.
  */
+export function createRenderer(container) {
+  const THREE = window.THREE;
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setClearAlpha(0);
+  renderer.setPixelRatio(window.devicePixelRatio);
+  renderer.toneMapping = THREE.NeutralToneMapping;
+  renderer.setSize(container.clientWidth, container.clientHeight);
+  container.appendChild(renderer.domElement);
+  return renderer;
+}
+
+export function resizeRendererToContainer(renderer, camera, container) {
+  const w = container.clientWidth;
+  const h = container.clientHeight;
+  renderer.setSize(w, h);
+  camera.aspect = w / h;
+}
+
 export function getDistanceToFitSphere(camera, radius) {
   // https://stackoverflow.com/a/44849975
   const vFOV = camera.getEffectiveFOV() * Math.PI / 180;
@@ -15,7 +33,7 @@ export function getDistanceToFitSphere(camera, radius) {
   return radius / Math.sin(fov * 0.5);
 }
 
-export function fitCameraToModel(camera, controls, model) {
+export function fitCameraToModel(camera, model) {
   const THREE = window.THREE;
   const box = new THREE.Box3();
   box.setFromObject(model);
@@ -23,36 +41,8 @@ export function fitCameraToModel(camera, controls, model) {
   const distance = getDistanceToFitSphere(camera, sphere.radius);
   const c = sphere.center;
   camera.position.set(c.x, c.y, c.z + distance);
-  camera.updateProjectionMatrix();
-  controls.target.copy(c);
-  controls.minDistance = sphere.radius * 0.2;
-  controls.maxDistance = distance + sphere.radius * 4;
-  controls.update();
-}
-
-export function readCameraSpherical(camera, target) {
-  const THREE = window.THREE;
-  const offset = camera.position.clone().sub(target);
-  const s = new THREE.Spherical().setFromVector3(offset);
-  return {
-    azimuth: s.theta * 180 / Math.PI,
-    elevation: s.phi * 180 / Math.PI,
-    distance: s.radius,
-  };
-}
-
-export function applyCameraSpherical(camera, controls, pose) {
-  const THREE = window.THREE;
-  const s = new THREE.Spherical(
-    pose.distance,
-    pose.elevation * Math.PI / 180,
-    pose.azimuth * Math.PI / 180
-  );
-  const offset = new THREE.Vector3().setFromSpherical(s);
-  if (pose.target) controls.target.set(pose.target[0], pose.target[1], pose.target[2]);
-  camera.position.copy(controls.target).add(offset);
-  camera.updateProjectionMatrix();
-  controls.update();
+  camera.lookAt(c);
+  return { target: [c.x, c.y, c.z], distance, radius: sphere.radius };
 }
 
 export function setupNeutralEnvironment(renderer, scene) {

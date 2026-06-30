@@ -6,7 +6,7 @@
  * 
  */
 
-import { fitCameraToModel, setupNeutralEnvironment, readCameraSpherical } from '../3d-helpers.js';
+import { fitCameraToModel, setupNeutralEnvironment, resizeRendererToContainer } from '../3d-helpers.js';
 
 (function () {
 
@@ -80,7 +80,11 @@ import { fitCameraToModel, setupNeutralEnvironment, readCameraSpherical } from '
         // wait until the model can be added to the scene without blocking due to shader compilation
 				await renderer.compileAsync( gltf.scene, camera, scene );
         scene.add(gltf.scene);
-        fitCameraToModel(camera, controls, gltf.scene);
+        const fit = fitCameraToModel(camera, gltf.scene);
+        controls.target.set(fit.target[0], fit.target[1], fit.target[2]);
+        controls.minDistance = fit.radius * 0.2;
+        controls.maxDistance = fit.distance + fit.radius * 4;
+        controls.update();
         controls.saveState();   // capture the framing so nav "reset" returns here
         initControlsUI();
       },
@@ -96,15 +100,24 @@ import { fitCameraToModel, setupNeutralEnvironment, readCameraSpherical } from '
   }
 
   function onWindowResize() {
-    camera.aspect = container.clientWidth / container.clientHeight;
+    resizeRendererToContainer( renderer, camera, container );
     camera.updateProjectionMatrix();
-    renderer.setSize( container.clientWidth, container.clientHeight );
     render();
   }
 
   function render() {
     controls.update();
     renderer.render( scene, camera );
+  }
+
+  function readCameraSpherical(camera, target) {
+    const offset = camera.position.clone().sub(target);
+    const s = new THREE.Spherical().setFromVector3(offset);
+    return {
+      azimuth: s.theta * 180 / Math.PI,
+      elevation: s.phi * 180 / Math.PI,
+      distance: s.radius,
+    };
   }
 
   // Nav-bar zoom/pan/reset, driving the three.js camera + OrbitControls. Mirrors
