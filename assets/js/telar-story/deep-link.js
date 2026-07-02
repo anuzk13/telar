@@ -29,7 +29,7 @@
  */
 
 import { state } from './state.js';
-import { activateCard } from './cards/card-pool.js';
+import { activateCard, deactivateCard } from './cards/card-pool.js';
 import { goToStep } from './navigation.js';
 import { openPanel } from './panels.js';
 
@@ -284,13 +284,21 @@ export function navigateToStep(stepNumber) {
     state.lenis.scrollTo(targetPx, { immediate: true, force: true });
     if (state.snap) state.snap.currentSnapIndex = targetIndex + 1; // keep Snap aligned (matches keyboardNav)
 
-    activateCard(targetIndex, 'forward');
+    const prevStep = state.currentIndex;
+    activateCard(targetIndex);
+    if (prevStep >= 0 && prevStep !== targetIndex) {
+      deactivateCard(prevStep, targetIndex > prevStep ? 'forward' : 'backward');
+    }
     state.currentIndex = targetIndex;
     state.scrollPosition = targetIndex + 1;
   } else {
+    const prevStep = state.currentMobileStep;
     state.currentMobileStep = targetIndex;
     state.mobileInIntro = false;
-    activateCard(targetIndex, 'forward');
+    activateCard(targetIndex);
+    if (prevStep >= 0 && prevStep !== targetIndex) {
+      deactivateCard(prevStep, targetIndex > prevStep ? 'forward' : 'backward');
+    }
 
     state.steps.forEach((step, i) => {
       if (i === targetIndex) {
@@ -348,15 +356,15 @@ export function applyDeepLinkOnLoad() {
     state.lenis.scrollTo(targetPx, { immediate: true, force: true });
     if (state.snap) state.snap.currentSnapIndex = targetIndex + 1; // keep Snap aligned
 
-    // Activate card and sync state
-    activateCard(targetIndex, 'forward');
+    // Activate card and sync state (initial load — nothing to deactivate)
+    activateCard(targetIndex);
     state.currentIndex = targetIndex;
     state.scrollPosition = targetIndex + 1;
   } else {
     // Button/mobile/iOS mode: no scroll surface — activate card directly
     state.currentMobileStep = targetIndex;
     state.mobileInIntro = false;
-    activateCard(targetIndex, 'forward');
+    activateCard(targetIndex);
 
     // Ensure the correct step has the mobile-active class
     state.steps.forEach((step, i) => {

@@ -53,8 +53,6 @@ export const state = {
   scrollProgress: 0,
   /** Whether a snap animation is currently in flight. */
   isSnapping: false,
-  /** Set true during scroll-driven activateCard calls so card-pool skips the 4s OSD animation. */
-  scrollDriven: false,
   /** Lenis instance reference — used by panels.js to stop/start scroll. */
   lenis: null,
   /** Snap plugin instance reference. */

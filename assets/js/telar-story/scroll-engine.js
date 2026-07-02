@@ -23,13 +23,7 @@
  * by each waypoint along the way.
  *
  * Per-frame wiring — every animation frame, the scroll callback computes
- * the current fractional position and drives the visual systems:
- * setCardProgress positions the next card proportionally during the
- * scroll scrub, lerpIiifPosition interpolates the IIIF viewer's x/y/zoom
- * coordinates between same-object step pairs, and lerpModelCamera does the
- * same for a 3D object's camera orbit and target. Smoothness comes from
- * Lenis's animatedScroll value, not from OpenSeadragon or model-viewer
- * animations.
+ * the current fractional position and drives the visual systems.
  *
  * Button and keyboard navigation — advanceToStep() triggers a Lenis
  * scrollTo() animation rather than jumping directly, so all navigation
@@ -45,7 +39,7 @@ import Lenis from 'lenis';
 import Snap from 'lenis/snap';
 import { state } from './state.js';
 import { onViewportResize } from './layout-mode.js';
-import { activateCard, setCardProgress, lerpModelCamera } from './cards/card-pool.js';
+import { scrollCardPool } from './cards/card-pool.js';
 import { writeHash } from './deep-link.js';
 import { goToStep, updateViewerInfo } from './navigation.js';
 import { initKeyboardNavigation } from './navigation.js';
@@ -59,7 +53,6 @@ let snapRemovers = [];
 let rafId;
 let dwellTimer;
 let totalPositions = 0;
-let keyboardNavInFlight = false;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -134,7 +127,6 @@ export function initScrollEngine(stepCount) {
       // 1.0), so state.currentIndex would not yet reflect the snapped step.
       const finalPosition = lenis.animatedScroll / window.innerHeight;
       updateScrollPosition(finalPosition);
-      writeHash();
       lenis.stop();
       dwellTimer = setTimeout(() => {
         if (!state.isPanelOpen) {
@@ -146,7 +138,7 @@ export function initScrollEngine(stepCount) {
   });
 
   // Register snap points: 0 = intro, 1..stepCount = content steps
-  registerSnapPoints(totalPositions);
+  // registerSnapPoints(totalPositions);
 
   // Wire scrub mode toggle
   // virtual-scroll fires on raw wheel/touch input before Lenis smoothing
@@ -235,10 +227,9 @@ export function advanceToStep(targetIndex) {
  * isLocked is true).  Uses lenis.scrollTo with force:true so it works
  * even during dwell or mid-snap animation.
  *
- * The 0.3s animated scroll drives lerpIiifPosition every frame for
- * smooth IIIF pan.  activateCard fires at the integer boundary with
- * scrollDriven=true so it skips the redundant 4s OSD spring animation
- * (the lerp already positioned the viewer correctly).
+ * It only drives the scroll — the scroll pipeline (scrollCardPool via
+ * updateScrollPosition) handles the card/plate transitions as the animation
+ * crosses each boundary, same as a wheel scroll.
  *
  * @param {'forward'|'backward'} direction
  */
@@ -268,49 +259,16 @@ export function keyboardNav(direction) {
   target = Math.max(0, Math.min(target, totalPositions - 1));
   if (target === rounded && isExact) return; // at boundary, no-op
 
-  // Backward only: reset any mid-scrub card that setCardProgress left
-  // partially positioned.  Forward leaves it — the CSS transition from
-  // activateCard will smoothly complete the slide from wherever it is.
-  if (direction === 'backward') {
-    const contentStepIndex = Math.floor(Math.max(0, position - 1));
-    const scrubCard = state.textCards?.[contentStepIndex + 1];
-    if (scrubCard && !scrubCard.classList.contains('is-active')) {
-      const rot  = parseFloat(scrubCard.dataset.messinessRot  || 0);
-      const offX = parseFloat(scrubCard.dataset.messinessOffX || 0);
-      const offY = parseFloat(scrubCard.dataset.messinessOffY || 0);
-      scrubCard.style.transform = `translateY(100vh) rotate(${rot}deg) translate(${offX}px, ${offY}px)`;
-    }
-  }
-
   // Sync snap.currentSnapIndex so wheel-triggered snaps stay aligned
   if (snap) snap.currentSnapIndex = target;
 
-  // Activate card immediately so it swaps on keypress — the IIIF lerp
-  // then runs during the 0.8s scroll animation for simultaneous effect.
-  // target is scroll position (intro=0, step0=1, step1=2…); stepIndex
-  // is target-1.  Skip for intro (target 0) since there's no card.
-  const targetStep = target - 1;
-  if (targetStep >= 0 && targetStep !== state.currentIndex) {
-    state.scrollDriven = true;
-    activateCard(targetStep, direction);
-    state.scrollDriven = false;
-    state.currentIndex = targetStep;
-    updateViewerInfo(targetStep);
-    if (state.onStepChange) state.onStepChange(targetStep);
-  }
-
-  // Suppress the activateCard guard in updateScrollPosition while Lenis
-  // animates toward the target — otherwise the first scroll frame sees
-  // the old stepIndex and fires activateCard(oldStep, 'backward'),
-  // undoing the immediate activation above.
-  keyboardNavInFlight = true;
-
+  // Card swap is driven by the scroll pipeline (scrollCardPool) as the
+  // scrollTo animation crosses the boundary — no pre-activation.
   lenis.scrollTo(target * vh, {
     force: true,
     duration: 0.8,
     easing: (t) => 1 - Math.pow(1 - t, 3),  // ease-out cubic
     onComplete: () => {
-      keyboardNavInFlight = false;
       writeHash();
     },
   });
@@ -346,7 +304,6 @@ export function getScrollEngineState() {
 export function updateScrollPosition(position) {
   // Content index: subtract 1 so intro = -1, first content step = 0
   const contentPos = position - 1;
-  const maxContent = state.steps.length - 1;
 
   // Store raw position on state
   state.scrollPosition = position;
@@ -359,7 +316,7 @@ export function updateScrollPosition(position) {
 
     // Crossed from content back to intro — but not during a keyboard-triggered
     // scroll animation, which passes through the intro zone on its way to step 1
-    if (state.currentIndex >= 0 && !keyboardNavInFlight) {
+    if (state.currentIndex >= 0) {
       goToStep(-1, 'backward');
     }
 
@@ -382,28 +339,14 @@ export function updateScrollPosition(position) {
     return;
   }
 
-  const clamped = Math.min(maxContent, contentPos);
-  const stepIndex = Math.floor(clamped);
-  const progress = clamped - stepIndex;
-
+  // The card pool owns the per-frame scrub + scene activate/deactivate.
+  const { stepIndex, progress } = scrollCardPool(contentPos);
   state.scrollProgress = progress;
 
-  // Per-frame scrub updates
-  setCardProgress(stepIndex, progress);
-  // Per-frame 3D camera interpolation. No-ops for non-model / cross-scene pairs.
-  lerpModelCamera(stepIndex, progress, state.stepsData || []);
-
-  // Integer boundary crossings — activateCard
-  // Mark as scroll-driven so activateCard skips the 4s OSD spring animation
-  // (lerpIiifPosition already positioned the viewer correctly each frame).
-  // Skip during keyboard nav — keyboardNav() already activated the card
-  // and the scroll position hasn't caught up yet.
-  if (stepIndex !== state.currentIndex && !keyboardNavInFlight) {
-    const direction = stepIndex > state.currentIndex ? 'forward' : 'backward';
-    state.scrollDriven = true;
-    activateCard(stepIndex, direction);
-    state.scrollDriven = false;
+  // Sync app state on step change (URL, panel triggers, step callback).
+  if (stepIndex !== state.currentIndex) {
     state.currentIndex = stepIndex;
+    writeHash();
     updateViewerInfo(stepIndex);
     if (state.onStepChange) state.onStepChange(stepIndex);
   }

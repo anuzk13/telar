@@ -29,7 +29,7 @@
  */
 
 import { state, MOBILE_NAV_COOLDOWN } from './state.js';
-import { activateCard, returnToIntro } from './cards/card-pool.js';
+import { activateCard, deactivateCard, returnToIntro } from './cards/card-pool.js';
 import { advanceToStep, keyboardNav } from './scroll-engine.js';
 import { writeHash } from './deep-link.js';
 import { initializeLoadingShimmer, showViewerSkeletonState } from './viewer.js';
@@ -55,7 +55,7 @@ export function initKeyboardNavigation() {
 }
 
 /**
- * Navigate to a specific step.
+ * Navigate to a specific step using arrows when lenis is not available.
  *
  * Delegates all visual transitions to the card pool (activateCard), which
  * handles viewer plate switching, text card sliding, and preloading based
@@ -68,6 +68,7 @@ export function goToStep(newIndex, direction = 'forward') {
   // Allow -1 for intro restoration on backward navigation
   if (newIndex < -1 || newIndex >= state.steps.length) return;
 
+  const prevStep = state.currentIndex;
   state.currentIndex = newIndex;
 
   if (newIndex === -1) {
@@ -89,7 +90,8 @@ export function goToStep(newIndex, direction = 'forward') {
   }
 
   // Card pool handles all visual transitions, viewer switching, and preloading
-  activateCard(newIndex, direction);
+  activateCard(newIndex, true);
+  if (prevStep >= 0 && prevStep !== newIndex) deactivateCard(prevStep, direction);   // the step just left
 
   // Panel trigger data update
   updateViewerInfo(newIndex);
@@ -275,7 +277,7 @@ function _dismissMobileIntro() {
 
   // Activate step 0
   state.currentMobileStep = 0;
-  activateCard(0, 'forward');
+  activateCard(0);
   updateViewerInfo(0);
   updateMobileButtonStates();
 }
@@ -313,6 +315,7 @@ function goToMobileStep(newIndex) {
     state.mobileNavigationCooldown = false;
   }, MOBILE_NAV_COOLDOWN);
 
+  const prevStep = state.currentMobileStep;
   const direction = newIndex > state.currentMobileStep ? 'forward' : 'backward';
 
   // Swap step visibility
@@ -328,7 +331,8 @@ function goToMobileStep(newIndex) {
   if (state.lenis) {
     advanceToStep(newIndex);
   } else {
-    activateCard(newIndex, direction);
+    activateCard(newIndex, true);
+    if (prevStep >= 0 && prevStep !== newIndex) deactivateCard(prevStep, direction);
   }
 
   updateViewerInfo(newIndex);

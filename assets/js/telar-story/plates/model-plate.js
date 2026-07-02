@@ -33,8 +33,8 @@ export class ModelPlate extends Plate {
   static containerClass = 'model-plate';
   static deps = loadThree;
 
-  constructor(container, objectId, sceneIndex, zIndex, initialStep) {
-    super(container, objectId, sceneIndex, zIndex, initialStep);
+  constructor(container, objectId, sceneIndex, zIndex, initialStep, initialStepIdx) {
+    super(container, objectId, sceneIndex, zIndex, initialStep, initialStepIdx);
     this._renderer = null;
     this._scene = null;
     this._camera = null;
@@ -151,8 +151,8 @@ export class ModelPlate extends Plate {
     this._cameraControl = null;
   }
 
-  /** Stop the camera animation when sent back. */
-  onSendBack() {
+  sendBack() {
+    super.sendBack();
     this._cameraControl?.stopAnimation();
   }
 
@@ -165,8 +165,8 @@ export class ModelPlate extends Plate {
     else this._cameraControl.snap(pose);
   }
 
-  /** Interpolate the camera between two steps by scroll progress (no animation). */
-  scroll(progress, stepA, stepB) {
+  /** Interpolate the camera between two steps by scroll progress. */
+  scrollContent(progress, stepA, stepB) {
     if (!this._cameraControl) return;
     this._cameraControl.lerp(this._resolvePose(stepA), this._resolvePose(stepB), progress);
   }

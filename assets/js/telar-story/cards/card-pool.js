@@ -15,7 +15,7 @@ const PLATE_TYPES = {
 
 const AHEAD = 2, BEHIND = 1; // viewer scenes kept loaded around the centred one
 let _currentSceneIdx = -1;
-let _currentStepIdx = -1;
+let _currentStepIdx = -1;             // active step — boundary detection + returnToIntro
 const _liveSceneIdxs = new Set();     // scene indices whose player is loaded
 const _cards = new Map();    // stepIndex → TextCard
 
@@ -32,9 +32,8 @@ function hasPlate(scene) {
 
 function makePlate(scene) {
   const Plate = PLATE_TYPES[scene.type];
-  return new Plate(scene.container, scene.objectId, scene.index, scene.z, scene.firstStep);
+  return new Plate(scene.container, scene.objectId, scene.index, scene.z, scene.firstStep, scene.firstStepIdx);
 }
-
 
 /** build scenes + make every plate (permanent, unloaded). */
 export function initPool(storyData, config) {
@@ -42,8 +41,8 @@ export function initPool(storyData, config) {
   for (const scene of state.scenes) {
     if (hasPlate(scene)) scene.plate = makePlate(scene);
   }
-  for (const idx in state.textCards)  _cards.set(+idx, new TextCard(state.textCards[idx]));
-  for (const idx in state.titleCards) _cards.set(+idx, new TextCard(state.titleCards[idx]));
+  for (const idx in state.textCards)  _cards.set(+idx, new TextCard(state.textCards[idx], +idx));
+  for (const idx in state.titleCards) _cards.set(+idx, new TextCard(state.titleCards[idx], +idx));
 
   // activate is not called for the title, activate the first scene
   setWindow(getSceneIndex(0));
@@ -69,62 +68,65 @@ function setWindow(centerIndex) {
   }
 }
 
-/** bring a viewer to the front: load its window, center it, send the previous back. */
-function centerViewer(scene, step, direction) {
-  if (scene.index === _currentSceneIdx) {              // same scene, new step => move the camera
-    scene.plate?.goToStep(step, !state.scrollDriven);
-    return;
-  }
-
-  const prevScene = state.scenes[_currentSceneIdx];
-  _currentSceneIdx = scene.index;
-
-  setWindow(scene.index);
-  scene.plate?.center(step);
-  if (direction === 'backward') prevScene?.plate?.sendBack();
-}
-
-/** center the step's text/title card; send the previously-centred one back. */
-function centerCard(stepIndex, direction) {
-  if (stepIndex === _currentStepIdx) return;
-  _cards.get(_currentStepIdx)?.sendBack(direction);
-  _cards.get(stepIndex)?.center();
-  _currentStepIdx = stepIndex;
-}
-
-/** scroll the centred plate between two steps. Caller ensures hasPlate + same scene. */
-function scroll(scene, progress, stepA, stepB) {
-  scene.plate.scroll(progress, stepA, stepB);
-}
-
-// ── App entry points (step index → scene). What scroll-engine / nav / deep-link call. ──
 
 export function initCardPool(storyData, config) {
   initPool(storyData, config);
 }
 
-export function activateCard(index, direction) {
-  centerViewer(state.scenes[getSceneIndex(index)], state.stepsData[index], direction);
-  centerCard(index, direction);
+export function activateCard(stepIndex, animate = false) {
+  _cards.get(stepIndex)?.center();
+  const sceneIndex = getSceneIndex(stepIndex);
+  const scene = state.scenes[sceneIndex];
+  scene?.plate?.goToStep(state.stepsData[stepIndex], animate);
+  if (sceneIndex !== _currentSceneIdx) { // moving to a new scene
+    state.scenes[_currentSceneIdx]?.plate?.sendBack();   // settle the departing scene's plate
+    setWindow(sceneIndex);
+    scene?.plate?.centerPlate();
+  }
+  _currentSceneIdx = sceneIndex;
+  _currentStepIdx = stepIndex;
 }
 
-/** Send the centred viewer + card back and clear the centred indices. */
+/** Deactivate one card: send it back. */
+export function deactivateCard(stepIndex, direction) {
+  _cards.get(stepIndex)?.sendBack(direction);
+}
+
+/** Send the active viewer + card back and clear the centred indices. */
 export function returnToIntro() {
-  state.scenes[_currentSceneIdx]?.plate?.sendBack();
-  _cards.get(_currentStepIdx)?.sendBack('backward');
+  state.scenes[0]?.plate?.sendBack('backward');
+  _cards.get(0)?.sendBack('backward');
   _currentSceneIdx = -1;
   _currentStepIdx = -1;
 }
 
-/** scroll-engine per frame — slide the next card in proportionally to scroll. */
-export function setCardProgress(stepIndex, progress) {
-  if (progress < 0.001) return;
-  _cards.get(stepIndex + 1)?.scrub(progress);
-}
+/**
+ * Per-frame scroll 
+ * @param {number} scrollProgress - continuous scroll position (0 = first step, 1 = second step, etc.)
+ */
+export function scrollCardPool(scrollProgress) {
+  console.log('scrollCardPool', `contentPos: ${scrollProgress}`);
+  const stepsData = state.stepsData;
+  const clamped = Math.min(stepsData.length - 1, scrollProgress);
+  const stepIndex = Math.floor(clamped);
+  const progress = clamped - stepIndex;
 
-export function lerpModelCamera(stepIndex, progress, stepsData) {
-  if (stepIndex + 1 >= stepsData.length) return;                          // no next step
-  if (getSceneIndex(stepIndex) !== getSceneIndex(stepIndex + 1)) return;  // crosses scenes
-  const scene = state.scenes[getSceneIndex(stepIndex)];
-  if (scene?.plate) scroll(scene, progress, stepsData[stepIndex], stepsData[stepIndex + 1]);
+  // Crossing scenes
+  if (stepIndex !== _currentStepIdx) {
+    const prevStep = _currentStepIdx;
+    const direction = stepIndex > prevStep ? 'forward' : 'backward';
+    activateCard(stepIndex, false);
+    if (prevStep >= 0) deactivateCard(prevStep, direction);
+  }
+
+  // Camera pose within the current scene.
+  if (stepIndex + 1 < stepsData.length && getSceneIndex(stepIndex) === getSceneIndex(stepIndex + 1)) {
+    state.scenes[getSceneIndex(stepIndex)]?.plate?.scrollContent(progress, stepsData[stepIndex], stepsData[stepIndex + 1]);
+  }
+
+  // Position cads and live plates from scroll
+  for (const [_, card] of _cards) card.scrollPos(scrollProgress);
+  for (const i of _liveSceneIdxs) state.scenes[i].plate.scrollPos(scrollProgress);
+
+  return { stepIndex, progress };
 }

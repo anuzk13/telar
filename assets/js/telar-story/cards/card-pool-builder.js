@@ -55,7 +55,7 @@ function buildSceneMaps(steps) {
     if (effectiveId !== currentId) {
       sceneIdx++;
       currentId = effectiveId;
-      state.scenes.push({ index: sceneIdx, objectId, firstStep: steps[i], z: _zPlan.plateZ[i] });
+      state.scenes.push({ index: sceneIdx, objectId, firstStep: steps[i], firstStepIdx: i, z: _zPlan.plateZ[i] });
     }
     state.stepToScene[i] = sceneIdx;
   }
