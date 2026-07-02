@@ -14,11 +14,26 @@ const PLATE_TYPES = {
 };
 
 const AHEAD = 2, BEHIND = 1; // viewer scenes kept loaded around the centred one
+
 let _currentSceneIdx = -1;
 let _currentStepIdx = -1;             // active step — boundary detection + returnToIntro
 const _liveSceneIdxs = new Set();     // scene indices whose player is loaded
 const _cards = new Map();    // stepIndex to TextCard
 const _plates = new Map();   // sceneIndex to Plate
+
+// css card animation
+const CARD_SLIDE_MS = 550;
+let _slideTimer;
+let _cardStackElem;
+
+/**
+ * Enable the cards'/plates' CSS transition.
+ */
+function enableCardSlide() {
+  _cardStackElem.classList.add('is-animating');
+  clearTimeout(_slideTimer);
+  _slideTimer = setTimeout(() => _cardStackElem.classList.remove('is-animating'), CARD_SLIDE_MS);
+}
 
 /** Whether this scene's type has a viewer plate */
 function hasPlate(scene) {
@@ -57,6 +72,7 @@ function setWindow(centerIndex) {
 
 /** build scenes, cards and plates */
 export function initCardPool(storyData, config) {
+  _cardStackElem = document.querySelector('.card-stack');
   buildScenes(storyData, config);
   for (const scene of state.scenes) {
     if (hasPlate(scene)) _plates.set(scene.index, makePlate(scene));
@@ -71,6 +87,7 @@ export function initCardPool(storyData, config) {
 }
 
 export function activateCard(stepIndex, animate = false) {
+  if (animate) enableCardSlide();
   _cards.get(stepIndex)?.center();
   const sceneIndex = getSceneIndex(stepIndex);
   _plates.get(sceneIndex)?.goToStep(state.stepsData[stepIndex], animate);

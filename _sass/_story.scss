@@ -57,14 +57,11 @@
   // CRITICAL: NO z-index here — mandatory for z-index banding to work
   overflow: visible;
 
-  // During scroll-driven scrubbing: disable CSS transitions for per-frame control
-  &.is-scrubbing .viewer-plate,
-  &.is-scrubbing .text-card {
-    transition: none;
-  }
-
-  &.is-scrubbing .title-card {
-    transition: none;
+  // conditional (is-animating) animation styles 
+  &.is-animating .viewer-plate,
+  &.is-animating .text-card,
+  &.is-animating .title-card {
+    transition: transform 0.5s ease-out;
   }
 }
 
@@ -75,9 +72,7 @@
   position: absolute;
   inset: 0;
   box-sizing: border-box;
-  transform: translateY(100%);                    // offscreen below by default
-  transition: transform 0.5s ease-out;           // pure slide, no fade
-  // Top-edge shadow and border matching text cards (visible during slide-up)
+  transform: translateY(100%);
   box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.15), 0 -6px 24px rgba(0, 0, 0, 0.12);
   border-top: 1px solid rgba(0, 0, 0, 0.1);
 
@@ -389,8 +384,7 @@
   flex-direction: column;
   justify-content: center;
   pointer-events: auto;
-  transform: translateY(100vh);          // offscreen below by default
-  transition: transform 0.5s ease-out;
+  transform: translateY(100vh);
   // Base shadow — cards always look like cards, not flat divs
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15), 0 6px 24px rgba(0, 0, 0, 0.12), 0 0 0 0.5px rgba(0, 0, 0, 0.1);
 
@@ -665,7 +659,6 @@
   align-items: center;
   justify-content: center;
   transform: translateY(100vh);
-  transition: transform 0.5s ease-out;
 
   .title-card-inner {
     text-align: center;
@@ -905,7 +898,10 @@
     max-height: 40vh;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    transition: transform 0.4s ease-out;  // Slightly faster than desktop 0.5s
+  }
+
+  .card-stack.is-animating .text-card {
+    transition-duration: 0.4s; // Slightly faster than desktop 0.5s
   }
 
   // ── Landscape-phone side card override ─────────────────────────────────────
