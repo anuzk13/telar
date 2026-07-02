@@ -17,7 +17,8 @@ const AHEAD = 2, BEHIND = 1; // viewer scenes kept loaded around the centred one
 let _currentSceneIdx = -1;
 let _currentStepIdx = -1;             // active step — boundary detection + returnToIntro
 const _liveSceneIdxs = new Set();     // scene indices whose player is loaded
-const _cards = new Map();    // stepIndex → TextCard
+const _cards = new Map();    // stepIndex to TextCard
+const _plates = new Map();   // sceneIndex to Plate
 
 /** Whether this scene's type has a viewer plate */
 function hasPlate(scene) {
@@ -35,11 +36,30 @@ function makePlate(scene) {
   return new Plate(scene.container, scene.objectId, scene.index, scene.z, scene.firstStep, scene.firstStepIdx);
 }
 
-/** build scenes + make every plate (permanent, unloaded). */
-export function initPool(storyData, config) {
+function resizeLivePlates() {
+  for (const i of _liveSceneIdxs) _plates.get(i).resize();
+}
+
+/** Load the viewer scenes in the [BEHIND, AHEAD] window around `centerIndex`; unload the rest. */
+function setWindow(centerIndex) {
+  const window = new Set();
+  for (let d = -BEHIND; d <= AHEAD; d++) {
+    const sceneIndex = centerIndex + d;
+    const plate = _plates.get(sceneIndex);
+    if (!plate) continue;
+    window.add(sceneIndex);
+    if (!_liveSceneIdxs.has(sceneIndex)) { plate.load(); _liveSceneIdxs.add(sceneIndex); }
+  }
+  for (const i of [..._liveSceneIdxs]) {
+    if (!window.has(i)) { _plates.get(i).unload(); _liveSceneIdxs.delete(i); }
+  }
+}
+
+/** build scenes, cards and plates */
+export function initCardPool(storyData, config) {
   buildScenes(storyData, config);
   for (const scene of state.scenes) {
-    if (hasPlate(scene)) scene.plate = makePlate(scene);
+    if (hasPlate(scene)) _plates.set(scene.index, makePlate(scene));
   }
   for (const idx in state.textCards)  _cards.set(+idx, new TextCard(state.textCards[idx], +idx));
   for (const idx in state.titleCards) _cards.set(+idx, new TextCard(state.titleCards[idx], +idx));
@@ -50,38 +70,14 @@ export function initPool(storyData, config) {
   onViewportResize(resizeLivePlates);
 }
 
-function resizeLivePlates() {
-  for (const i of _liveSceneIdxs) state.scenes[i].plate.resize();
-}
-
-/** Load the viewer scenes in the [BEHIND, AHEAD] window around `centerIndex`; unload the rest. */
-function setWindow(centerIndex) {
-  const window = new Set();
-  for (let d = -BEHIND; d <= AHEAD; d++) {
-    const scene = state.scenes[centerIndex + d];
-    if (!scene?.plate) continue;
-    window.add(scene.index);
-    if (!_liveSceneIdxs.has(scene.index)) { scene.plate.load(); _liveSceneIdxs.add(scene.index); }
-  }
-  for (const i of [..._liveSceneIdxs]) {
-    if (!window.has(i)) { state.scenes[i].plate.unload(); _liveSceneIdxs.delete(i); }
-  }
-}
-
-
-export function initCardPool(storyData, config) {
-  initPool(storyData, config);
-}
-
 export function activateCard(stepIndex, animate = false) {
   _cards.get(stepIndex)?.center();
   const sceneIndex = getSceneIndex(stepIndex);
-  const scene = state.scenes[sceneIndex];
-  scene?.plate?.goToStep(state.stepsData[stepIndex], animate);
+  _plates.get(sceneIndex)?.goToStep(state.stepsData[stepIndex], animate);
   if (sceneIndex !== _currentSceneIdx) { // moving to a new scene
-    state.scenes[_currentSceneIdx]?.plate?.sendBack();   // settle the departing scene's plate
+    _plates.get(_currentSceneIdx)?.sendBack();   // settle the departing scene's plate
     setWindow(sceneIndex);
-    scene?.plate?.centerPlate();
+    _plates.get(sceneIndex)?.centerPlate();
   }
   _currentSceneIdx = sceneIndex;
   _currentStepIdx = stepIndex;
@@ -94,7 +90,7 @@ export function deactivateCard(stepIndex, direction) {
 
 /** Send the active viewer + card back and clear the centred indices. */
 export function returnToIntro() {
-  state.scenes[0]?.plate?.sendBack('backward');
+  _plates.get(0)?.sendBack('backward');
   _cards.get(0)?.sendBack('backward');
   _currentSceneIdx = -1;
   _currentStepIdx = -1;
@@ -121,12 +117,12 @@ export function scrollCardPool(scrollProgress) {
 
   // Camera pose within the current scene.
   if (stepIndex + 1 < stepsData.length && getSceneIndex(stepIndex) === getSceneIndex(stepIndex + 1)) {
-    state.scenes[getSceneIndex(stepIndex)]?.plate?.scrollContent(progress, stepsData[stepIndex], stepsData[stepIndex + 1]);
+    _plates.get(getSceneIndex(stepIndex))?.scrollContent(progress, stepsData[stepIndex], stepsData[stepIndex + 1]);
   }
 
   // Position cads and live plates from scroll
   for (const [_, card] of _cards) card.scrollPos(scrollProgress);
-  for (const i of _liveSceneIdxs) state.scenes[i].plate.scrollPos(scrollProgress);
+  for (const i of _liveSceneIdxs) _plates.get(i).scrollPos(scrollProgress);
 
   return { stepIndex, progress };
 }
