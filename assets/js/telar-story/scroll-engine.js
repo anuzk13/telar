@@ -140,15 +140,6 @@ export function initScrollEngine(stepCount) {
   // Register snap points: 0 = intro, 1..stepCount = content steps
   // registerSnapPoints(totalPositions);
 
-  // Wire scrub mode toggle
-  // virtual-scroll fires on raw wheel/touch input before Lenis smoothing
-  let scrubEndTimer;
-  lenis.on('virtual-scroll', () => {
-    cardStack.classList.add('is-scrubbing');
-    clearTimeout(scrubEndTimer);
-    scrubEndTimer = setTimeout(() => cardStack.classList.remove('is-scrubbing'), 100);
-  });
-
   // Per-frame position update from smoothed scroll output
   lenis.on('scroll', (l) => {
     const position = l.animatedScroll / window.innerHeight;
@@ -195,7 +186,6 @@ function registerSnapPoints(count) {
  * Programmatically navigate to a step (button/keyboard nav).
  *
  * Uses lenis.scrollTo so the same physics engine drives the animation.
- * Does NOT add is-scrubbing so CSS transitions play at full duration.
  *
  * @param {number} targetIndex - Target step index.
  */
