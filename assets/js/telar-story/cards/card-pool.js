@@ -1,5 +1,5 @@
 /**
- * Telar Story — card pool (orchestrator) 
+ * Telar Story — card pool - orchestrates cards and panels with scrolling or navigation story progression
  */
 
 import { state } from '../state.js';
@@ -101,7 +101,6 @@ export function returnToIntro() {
  * @param {number} scrollProgress - continuous scroll position (0 = first step, 1 = second step, etc.)
  */
 export function scrollCardPool(scrollProgress) {
-  console.log('scrollCardPool', `contentPos: ${scrollProgress}`);
   const stepsData = state.stepsData;
   const clamped = Math.min(stepsData.length - 1, scrollProgress);
   const stepIndex = Math.floor(clamped);

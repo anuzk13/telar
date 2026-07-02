@@ -1,11 +1,7 @@
 /**
  * Telar Story — Base Plate
  *
- * One viewer for a scene. The instance is permanent; its player loads/unloads.
- *
- * Two axes:
- *   load / unload      — the player (libraries + file + GPU)
- *   center / sendBack  — the visual position
+ * Interface for a viewer (3d panel, IIIF image, video, audio, etc.)
  */
 
 export class Plate {
@@ -71,7 +67,7 @@ export class Plate {
   }
 
   /** Player scroll interpolation between two steps inside a scene */
-  scrollContent(progress, stepA, stepB) { }
+  scrollContent(progress, stepA, stepB) {}
 
   /** React to a viewport resize. */
   resize() {}

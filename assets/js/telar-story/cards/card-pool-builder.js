@@ -161,7 +161,7 @@ function buildCards(steps, cardStack) {
   }
 }
 
-// ── Geometry recompute on resize / layout change (verbatim) ───────────────────
+// ── Geometry recompute on resize / layout change  ───────────────────
 
 function recomputeCardGeometry(viewportW, viewportH) {
   const peekHeight = _config.peekHeight ?? 1;
@@ -185,7 +185,7 @@ function recomputeCardGeometry(viewportW, viewportH) {
   }
 }
 
-// ── Z-index plan (verbatim) ───────────────────────────────────────────────────
+// ── Z-index plan  ───────────────────────────────────────────────────
 
 function computeZIndexPlan(steps) {
   let scene = -1;
@@ -241,7 +241,7 @@ function buildTransform(messiness, baseTranslate) {
   return `${baseTranslate} rotate(${messiness.rot}deg) translate(${messiness.offX}px, ${messiness.offY}px)`;
 }
 
-// ── Card content (verbatim) ───────────────────────────────────────────────────
+// ── Card content  ───────────────────────────────────────────────────
 
 function buildAriaLabel(objectId, stepAlt, cardType) {
   if (stepAlt) return stepAlt;

@@ -1,8 +1,7 @@
 /**
  * Telar Story — Model Plate
  *
- * Plate subclass for self-hosted 3D objects rendered with Google's <model-viewer> via WebGL. 
- * 
+ * Plate subclass for self-hosted 3D objects rendered with Three.js.
  */
 
 import { Plate } from './base-plate.js';
@@ -11,7 +10,7 @@ import { getLayoutMode } from './../layout-mode.js';
 import { createRenderer, fitCameraToModel, setupNeutralEnvironment, resizeRendererToContainer } from './../../3d-helpers.js';
 
 
-/** Load the three.js UMD bundle once (THREE + GLTFLoader + RoomEnvironment). */
+/** Load the three.js UMD bundle. */
 let _threePromise;
 function loadThree() {
   if (_threePromise) return _threePromise;
