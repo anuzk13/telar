@@ -16,8 +16,6 @@
     scrollProgress: 0,
     /** Whether a snap animation is currently in flight. */
     isSnapping: false,
-    /** Set true during scroll-driven activateCard calls so card-pool skips the 4s OSD animation. */
-    scrollDriven: false,
     /** Lenis instance reference — used by panels.js to stop/start scroll. */
     lenis: null,
     /** Snap plugin instance reference. */
@@ -322,22 +320,6 @@
       });
     }
   }
-  function updateObjectCredits(objectId) {
-    if (!window.telarConfig?.showObjectCredits) return;
-    if (state.creditsDismissed) return;
-    const badge = document.getElementById("object-credits-badge");
-    const textElement = document.getElementById("object-credits-text");
-    if (!badge || !textElement) return;
-    const objectData = state.objectsIndex[objectId];
-    const credit = objectData?.credit;
-    if (credit && credit.trim()) {
-      const prefix = window.telarLang?.creditPrefix || "Credit:";
-      textElement.textContent = `${prefix} ${credit}`;
-      badge.classList.remove("d-none");
-    } else {
-      badge.classList.add("d-none");
-    }
-  }
 
   // assets/js/telar-story/card-type.js
   var YOUTUBE_RE = /(?:youtube\.com\/(?:watch\?.*v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/;
@@ -357,10 +339,731 @@
     if (MODEL_FILE_RE.test(filePath)) return "model";
     return "iiif";
   }
-  function extractVideoId(cardType, sourceUrl) {
-    const regexMap = { youtube: YOUTUBE_RE, vimeo: VIMEO_RE, "google-drive": GDRIVE_RE };
-    const match = (sourceUrl || "").match(regexMap[cardType]);
-    return match ? match[1] : null;
+
+  // assets/js/telar-story/cards/card-pool-builder.js
+  var _config = { peekHeight: 1, messiness: 20 };
+  var _zPlan = { plateZ: {}, textCardZ: {} };
+  function buildScenes(storyData, config) {
+    const cardStack = document.querySelector(".card-stack");
+    if (!cardStack) return;
+    const steps = (storyData?.steps || []).filter((s) => !s._metadata);
+    state.stepsData = steps;
+    _config = { peekHeight: config?.peekHeight ?? 1, messiness: config?.messiness ?? 20 };
+    _zPlan = computeZIndexPlan(steps);
+    buildSceneMaps(steps);
+    buildViewerPlates(cardStack);
+    buildCards(steps, cardStack);
+    onViewportResize(({ viewport }) => recomputeCardGeometry(viewport.w, viewport.h));
+    onLayoutChange(({ viewport }) => recomputeCardGeometry(viewport.w, viewport.h));
+    recomputeCardGeometry(window.innerWidth, window.innerHeight);
+  }
+  function buildSceneMaps(steps) {
+    state.stepToScene = {};
+    state.scenes = [];
+    let sceneIdx = -1;
+    let currentId = null;
+    let titleCounter = 0;
+    for (let i = 0; i < steps.length; i++) {
+      const objectId = steps[i].object || steps[i].objectId || "";
+      const effectiveId = objectId === "" ? "__title_" + titleCounter++ + "__" : objectId;
+      if (effectiveId !== currentId) {
+        sceneIdx++;
+        currentId = effectiveId;
+        state.scenes.push({ index: sceneIdx, objectId, firstStep: steps[i], firstStepIdx: i, z: _zPlan.plateZ[i] });
+      }
+      state.stepToScene[i] = sceneIdx;
+    }
+    state.totalScenes = sceneIdx + 1;
+  }
+  function getSceneIndex(stepIndex) {
+    return state.stepToScene[stepIndex] ?? -1;
+  }
+  function buildViewerPlates(cardStack) {
+    const audioObjects = window.audioObjects || {};
+    const modelObjects = window.modelObjects || {};
+    const filePathFor = (id) => {
+      if (audioObjects[id]) return `objects/${id}.${audioObjects[id]}`;
+      if (modelObjects[id]) return `objects/${id}.${modelObjects[id]}`;
+      return "";
+    };
+    for (const scene of state.scenes) {
+      if (!scene.objectId) {
+        scene.type = "title";
+        continue;
+      }
+      const objectData = state.objectsIndex[scene.objectId] || {};
+      scene.type = detectCardType({
+        objectId: scene.objectId,
+        cardType: scene.firstStep.cardType,
+        source_url: objectData.source_url || objectData.iiif_manifest || "",
+        file_path: filePathFor(scene.objectId)
+      });
+      const el = document.createElement("div");
+      el.className = "viewer-plate";
+      el.dataset.object = scene.objectId;
+      el.dataset.scene = String(scene.index);
+      el.dataset.cardType = scene.type;
+      el.style.zIndex = scene.z;
+      el.setAttribute("role", "img");
+      el.setAttribute("aria-label", buildAriaLabel(scene.objectId, scene.firstStep.alt_text, scene.type));
+      el.style.transform = "translateY(100%)";
+      cardStack.appendChild(el);
+      scene.container = el;
+      state.viewerPlates[scene.index] = el;
+    }
+  }
+  function buildCards(steps, cardStack) {
+    const viewportH = window.innerHeight;
+    const cardH = viewportH * 0.8;
+    const peekHeight = _config.peekHeight;
+    const messinessPercent = _config.messiness;
+    state.titleCards = {};
+    const runPositions = {};
+    for (let stepIdx = 0; stepIdx < steps.length; stepIdx++) {
+      const step = steps[stepIdx];
+      const objectId = step.object || step.objectId || "";
+      if (!objectId) {
+        const titleCard = document.createElement("div");
+        titleCard.className = "title-card";
+        titleCard.dataset.stepIndex = String(stepIdx);
+        titleCard.dataset.cardType = "title";
+        titleCard.style.zIndex = _zPlan.textCardZ[stepIdx];
+        titleCard.style.transform = "translateY(100vh)";
+        titleCard.innerHTML = buildTitleCardContent(step);
+        cardStack.appendChild(titleCard);
+        state.titleCards[stepIdx] = titleCard;
+        continue;
+      }
+      if (!Object.hasOwn(runPositions, objectId)) runPositions[objectId] = 0;
+      const runPos = runPositions[objectId]++;
+      const topPx = computeCardTop(viewportH, cardH, 0, peekHeight);
+      const messiness = getCardMessiness(stepIdx, messinessPercent);
+      const card = document.createElement("div");
+      card.className = "text-card";
+      card.dataset.stepIndex = stepIdx;
+      card.dataset.object = objectId;
+      card.dataset.runPosition = runPos;
+      card.style.zIndex = _zPlan.textCardZ[stepIdx];
+      card.style.top = `${topPx}px`;
+      card.style.height = `${cardH}px`;
+      card.style.transform = buildTransform(messiness, "translateY(100vh)");
+      card.dataset.messinessRot = messiness.rot;
+      card.dataset.messinessOffX = messiness.offX;
+      card.dataset.messinessOffY = messiness.offY;
+      const hiddenStep = document.querySelector(`.step-data .story-step[data-step="${step.step}"]`);
+      const content = hiddenStep?.querySelector(".step-content");
+      if (content) card.appendChild(content.cloneNode(true));
+      else card.innerHTML = buildTextCardContent(step);
+      cardStack.appendChild(card);
+      state.textCards[stepIdx] = card;
+    }
+  }
+  function recomputeCardGeometry(viewportW, viewportH) {
+    const peekHeight = _config.peekHeight ?? 1;
+    const landscapeSideCard = isLandscapeSideCard();
+    for (const card of document.querySelectorAll(".text-card")) {
+      const runPos = parseInt(card.dataset.runPosition, 10) || 0;
+      if (landscapeSideCard) {
+        card.style.height = "";
+        const cardH = card.offsetHeight;
+        card.style.setProperty("top", `${computeCardTop(viewportH, cardH, runPos, peekHeight)}px`, "important");
+      } else if (getLayoutMode() === "vertical") {
+        card.style.removeProperty("top");
+        card.style.height = `${viewportH * 0.8}px`;
+      } else {
+        const cardH = viewportH * 0.8;
+        card.style.setProperty("top", `${computeCardTop(viewportH, cardH, runPos, peekHeight)}px`, "important");
+        card.style.height = `${cardH}px`;
+      }
+    }
+  }
+  function computeZIndexPlan(steps) {
+    let scene = -1;
+    let runPos = 0;
+    let currentObjectId = null;
+    let titleCounter = 0;
+    const plateZ = {};
+    const textCardZ = {};
+    for (let i = 0; i < steps.length; i++) {
+      const objectId = steps[i].object || steps[i].objectId || "";
+      const effectiveId = objectId === "" ? "__title_" + titleCounter++ + "__" : objectId;
+      if (effectiveId !== currentObjectId) {
+        scene++;
+        runPos = 0;
+        currentObjectId = effectiveId;
+      }
+      if (scene === 97) {
+        console.warn("[Telar] Story has more than 98 unique scenes; z-index banding is clamped at 9800.");
+      }
+      const bandBase = Math.min((scene + 1) * 100, 9800);
+      plateZ[i] = bandBase;
+      textCardZ[i] = bandBase + 1 + runPos;
+      runPos++;
+    }
+    return { plateZ, textCardZ };
+  }
+  function seededRandom(seed) {
+    const n = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
+    return n - Math.floor(n);
+  }
+  function getCardMessiness(seed, messinessPercent) {
+    if (messinessPercent === 0) return { rot: 0, offX: 0, offY: 0 };
+    const factor = messinessPercent / 100;
+    const maxRot = 1.2 * factor, maxOffX = 8 * factor, maxOffY = 4 * factor;
+    return {
+      rot: seededRandom(seed * 3 + 1) * maxRot * 2 - maxRot,
+      offX: seededRandom(seed * 3 + 2) * maxOffX * 2 - maxOffX,
+      offY: seededRandom(seed * 3 + 3) * maxOffY * 2 - maxOffY
+    };
+  }
+  function computeCardTop(viewportH, cardH, runPosition, peekHeightPx) {
+    return (viewportH - cardH) / 2 + runPosition * peekHeightPx;
+  }
+  function buildTransform(messiness, baseTranslate) {
+    return `${baseTranslate} rotate(${messiness.rot}deg) translate(${messiness.offX}px, ${messiness.offY}px)`;
+  }
+  function buildAriaLabel(objectId, stepAlt, cardType) {
+    if (stepAlt) return stepAlt;
+    const obj = state.objectsIndex?.[objectId] || {};
+    if (obj.alt_text) return obj.alt_text;
+    if (obj.title) return obj.title;
+    if (objectId) return objectId;
+    if (cardType === "youtube" || cardType === "vimeo" || cardType === "google-drive") return "Video player";
+    if (cardType === "audio") return "Audio player";
+    if (cardType === "model") return "3D model viewer";
+    return "Image viewer";
+  }
+  function buildTextCardContent(step) {
+    const question = escapeHtml(step.question || "");
+    const answer = escapeHtml(step.answer || "");
+    let layerButtons = "";
+    if (step.layer1_button && step.layer1_button.trim()) {
+      layerButtons += `<button class="panel-trigger" data-panel="layer1" data-step="${step.step}">${escapeHtml(step.layer1_button)}</button>`;
+    }
+    if (step.layer2_button && step.layer2_button.trim()) {
+      layerButtons += `<button class="panel-trigger" data-panel="layer2" data-step="${step.step}">${escapeHtml(step.layer2_button)}</button>`;
+    }
+    return `
+    <div class="step-question">${question}</div>
+    <div class="step-answer">${answer}</div>
+    ${layerButtons ? `<div class="step-actions">${layerButtons}</div>` : ""}
+  `;
+  }
+  function buildTitleCardContent(step) {
+    const heading = step.question || "";
+    const body = step.answer || "";
+    return `
+    <div class="title-card-inner">
+      <h2 class="title-card-heading">${heading}</h2>
+      ${body ? '<p class="title-card-body">' + body + "</p>" : ""}
+    </div>
+  `;
+  }
+
+  // assets/js/telar-story/plates/base-plate.js
+  var Plate = class {
+    static containerClass = "base-plate";
+    static deps = () => Promise.resolve();
+    // libraries this type needs (subclass overrides)
+    constructor(container, objectId, sceneIndex, zIndex, firstStep, firstStepIdx) {
+      this.container = container;
+      this.objectId = objectId;
+      this.sceneIndex = sceneIndex;
+      this.zIndex = zIndex;
+      this._currentStep = firstStep;
+      this._firstStepIdx = firstStepIdx;
+      this._loadPromise = null;
+      container.classList.add(this.constructor.containerClass);
+    }
+    /** Idempotent load of libraries and build player */
+    load() {
+      if (this._loadPromise) return this._loadPromise;
+      this._loadPromise = this.constructor.deps().then(() => this._build());
+      return this._loadPromise;
+    }
+    /** Tear down the player. */
+    unload() {
+      if (!this._loadPromise) return;
+      this._teardown();
+      this._loadPromise = null;
+      this.container.querySelector(".telar-alert")?.remove();
+      delete this.container.dataset.loading;
+    }
+    /** Bring to the front. */
+    centerPlate() {
+      this.load();
+      this.container.style.zIndex = this.zIndex;
+      this.container.style.transform = "translateY(0)";
+      this.container.classList.add("is-active");
+    }
+    /** Settle plate off screen */
+    sendBack(direction) {
+      this.container.classList.remove("is-active");
+      if (direction === "backward") {
+        this.container.style.transform = "translateY(100%)";
+      }
+    }
+    /** Move the camera to a step (snap, or ease when animate). */
+    goToStep(step, animate = false) {
+    }
+    /**
+     * Position from the continuous scroll: 0 while its scene is current, sliding
+     * down to 100% one step below it, staying put (covered) above it.
+     * @param {number} scrollProgress - continuous scroll position (0 = first step, 1 = second step, etc.)
+     */
+    scrollPos(scrollProgress) {
+      const distToScroll = this._firstStepIdx - scrollProgress;
+      const t = Math.min(1, Math.max(0, distToScroll)) * 100;
+      this.container.style.transform = `translateY(${t}%)`;
+    }
+    /** Player scroll interpolation between two steps inside a scene */
+    scrollContent(progress, stepA, stepB) {
+    }
+    /** React to a viewport resize. */
+    resize() {
+    }
+    /** Build the player */
+    _build() {
+    }
+    /** Free the player */
+    _teardown() {
+    }
+  };
+
+  // assets/js/3d-helpers.js
+  function createRenderer(container) {
+    const THREE = window.THREE;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setClearAlpha(0);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.toneMapping = THREE.NeutralToneMapping;
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    container.appendChild(renderer.domElement);
+    return renderer;
+  }
+  function resizeRendererToContainer(renderer, camera, container) {
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+  }
+  function getDistanceToFitSphere(camera, radius) {
+    const vFOV = camera.getEffectiveFOV() * Math.PI / 180;
+    const hFOV = Math.atan(Math.tan(vFOV * 0.5) * camera.aspect) * 2;
+    const fov = 1 < camera.aspect ? vFOV : hFOV;
+    return radius / Math.sin(fov * 0.5);
+  }
+  function fitCameraToModel(camera, model) {
+    const THREE = window.THREE;
+    const box = new THREE.Box3();
+    box.setFromObject(model);
+    const sphere = box.getBoundingSphere(new THREE.Sphere());
+    const distance = getDistanceToFitSphere(camera, sphere.radius);
+    const c = sphere.center;
+    camera.position.set(c.x, c.y, c.z + distance);
+    camera.lookAt(c);
+    return { target: [c.x, c.y, c.z], distance, radius: sphere.radius };
+  }
+  function setupNeutralEnvironment(renderer, scene) {
+    const THREE = window.THREE;
+    const RoomEnvironment = window.RoomEnvironment;
+    const pmremGenerator = new THREE.PMREMGenerator(renderer);
+    scene.environment = pmremGenerator.fromScene(new RoomEnvironment()).texture;
+    pmremGenerator.dispose();
+  }
+
+  // assets/js/telar-story/plates/model-plate.js
+  var _threePromise;
+  function loadThree() {
+    if (_threePromise) return _threePromise;
+    _threePromise = new Promise((resolve, reject) => {
+      if (window.THREE) return resolve();
+      const s = document.createElement("script");
+      s.src = `${getBasePath()}/assets/vendor/umd_threejs.js`;
+      s.async = true;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("three.js failed to load"));
+      document.head.appendChild(s);
+    });
+    return _threePromise;
+  }
+  var ModelPlate = class extends Plate {
+    static containerClass = "model-plate";
+    static deps = loadThree;
+    constructor(container, objectId, sceneIndex, zIndex, initialStep, initialStepIdx) {
+      super(container, objectId, sceneIndex, zIndex, initialStep, initialStepIdx);
+      this._renderer = null;
+      this._scene = null;
+      this._camera = null;
+      this._model = null;
+      this._autoFraming = null;
+      this._cameraControl = null;
+    }
+    /** Build renderer + load the GLB. Resolves when the model's first frame is ready. */
+    _build() {
+      const THREE = window.THREE;
+      const GLTFLoader = window.GLTFLoader;
+      const ext = window.modelObjects[this.objectId];
+      const url = `${getBasePath()}/telar-content/objects/${this.objectId}.${ext}`;
+      this.container.dataset.loading = "true";
+      const renderer = createRenderer(this.container);
+      renderer.domElement.className = "model-instance";
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        this.container.clientWidth / this.container.clientHeight,
+        0.01,
+        1e3
+      );
+      setupNeutralEnvironment(renderer, scene);
+      this._renderer = renderer;
+      this._scene = scene;
+      this._camera = camera;
+      return new Promise((resolve, reject) => {
+        new GLTFLoader().load(
+          url,
+          (gltf) => {
+            if (!this._renderer) return;
+            this._model = gltf.scene;
+            scene.add(gltf.scene);
+            this._autoFraming = fitCameraToModel(camera, gltf.scene);
+            this._cameraControl = new CameraControl(camera, () => this._render());
+            this._applyViewOffset();
+            delete this.container.dataset.loading;
+            this.goToStep(this._currentStep, false);
+            this._render();
+            resolve();
+          },
+          void 0,
+          (err) => {
+            delete this.container.dataset.loading;
+            this._injectModelError();
+            reject(err);
+          }
+        );
+      });
+    }
+    _render() {
+      this._renderer.render(this._scene, this._camera);
+    }
+    resize() {
+      if (!this._renderer) return;
+      resizeRendererToContainer(this._renderer, this._camera, this.container);
+      this._applyViewOffset();
+      this._render();
+    }
+    /**
+     * Apply the view offset based on the current layout mode so the model bleeds behind the card view
+     */
+    _applyViewOffset() {
+      const w = this.container.clientWidth;
+      const h = this.container.clientHeight;
+      if (getLayoutMode() === "vertical") {
+        this._camera.setViewOffset(w, h, 0, 0.2 * h, w, h);
+      } else {
+        this._camera.setViewOffset(w, h, -0.2 * w, 0, w, h);
+      }
+    }
+    /** Free the renderer, GPU resources and WebGL context. */
+    _teardown() {
+      this._cameraControl?.stopAnimation();
+      this._scene.traverse((obj) => {
+        if (obj.geometry) obj.geometry.dispose();
+        const materials = Array.isArray(obj.material) ? obj.material : [obj.material];
+        for (const m of materials) {
+          if (!m) continue;
+          for (const key in m) {
+            if (m[key] && m[key].isTexture) m[key].dispose();
+          }
+          m.dispose();
+        }
+      });
+      if (this._scene.environment) this._scene.environment.dispose();
+      this._renderer.dispose();
+      this._renderer.forceContextLoss();
+      this._renderer.domElement.remove();
+      this._renderer = null;
+      this._scene = null;
+      this._camera = null;
+      this._model = null;
+      this._autoFraming = null;
+      this._cameraControl = null;
+    }
+    sendBack() {
+      super.sendBack();
+      this._cameraControl?.stopAnimation();
+    }
+    /** Move to a step pose: eased on discrete navigation, snapped otherwise. */
+    goToStep(step, animate = false) {
+      this._currentStep = step;
+      if (!this._cameraControl) return;
+      const pose = this._resolvePose(step);
+      if (animate) this._cameraControl.ease(pose);
+      else this._cameraControl.snap(pose);
+    }
+    /** Interpolate the camera between two steps by scroll progress. */
+    scrollContent(progress, stepA, stepB) {
+      if (!this._cameraControl) return;
+      this._cameraControl.lerp(this._resolvePose(stepA), this._resolvePose(stepB), progress);
+    }
+    /**
+     * Resolve a step's framing columns to a numeric pose
+     *
+     * @returns {{ azimuth: number, elevation: number, distance: number, target: number[] }}
+     */
+    _resolvePose(step) {
+      const [azimuth, elevation, distance] = this._stepOrbit(step);
+      const target = this._stepTarget(step);
+      return { azimuth, elevation, distance, target };
+    }
+    /**
+     * Read a step's orbit columns into [azimuth, elevation, distance]; empty values
+     * default to 0° / 75° / the model's ideal framing distance.
+     */
+    _stepOrbit(step) {
+      const az = this._num(step.azimuth) ?? 0;
+      const el = this._num(step.elevation) ?? 75;
+      const dist = this._num(step.distance) ?? this._autoFraming.distance;
+      return [az, el, dist];
+    }
+    /**
+     * Read a step's look-at target into [x, y, z] metres; empty values default to
+     * the model's bounding-sphere centre.
+     */
+    _stepTarget(step) {
+      const x = this._num(step.target_x) ?? this._autoFraming.target[0];
+      const y = this._num(step.target_y) ?? this._autoFraming.target[1];
+      const z = this._num(step.target_z) ?? this._autoFraming.target[2];
+      return [x, y, z];
+    }
+    /**
+     * Parse story value as number or null
+     */
+    _num(v) {
+      const n = parseFloat(v);
+      return Number.isNaN(n) ? null : n;
+    }
+    /**
+     * Inject a .telar-alert error notification into the model plate.
+     */
+    _injectModelError() {
+      if (this.container.querySelector(".telar-alert")) return;
+      const alertEl = document.createElement("div");
+      alertEl.className = "alert alert-warning telar-alert";
+      alertEl.setAttribute("role", "alert");
+      alertEl.innerHTML = `<strong>3D model unavailable</strong>
+<p>This 3D model could not be loaded. Continue scrolling to read the story.</p>`;
+      this.container.appendChild(alertEl);
+    }
+  };
+  var EASE_DURATION = 600;
+  var CameraControl = class {
+    constructor(camera, onChange) {
+      this._camera = camera;
+      this._onChange = onChange;
+      this._pose = null;
+      this._animFrame = null;
+    }
+    /** 
+     * Fix a pose
+     **/
+    snap(pose) {
+      this.stopAnimation();
+      this._positionCamera(pose);
+    }
+    /** 
+     * Lerp between two poses over t in [0, 1] and show the intermediate pose.
+     **/
+    lerp(a, b, t) {
+      this._positionCamera({
+        azimuth: a.azimuth + (b.azimuth - a.azimuth) * t,
+        elevation: a.elevation + (b.elevation - a.elevation) * t,
+        distance: a.distance + (b.distance - a.distance) * t,
+        target: [
+          a.target[0] + (b.target[0] - a.target[0]) * t,
+          a.target[1] + (b.target[1] - a.target[1]) * t,
+          a.target[2] + (b.target[2] - a.target[2]) * t
+        ]
+      });
+    }
+    /** 
+     * Animate to a specific pose
+     **/
+    ease(to) {
+      this.stopAnimation();
+      const from = this._pose;
+      const start = performance.now();
+      const tick = (now) => {
+        const t = Math.min((now - start) / EASE_DURATION, 1);
+        this.lerp(from, to, t);
+        this._animFrame = t < 1 ? requestAnimationFrame(tick) : null;
+      };
+      this._animFrame = requestAnimationFrame(tick);
+    }
+    stopAnimation() {
+      if (this._animFrame) {
+        cancelAnimationFrame(this._animFrame);
+        this._animFrame = null;
+      }
+    }
+    /** 
+     * Position the camera from a pose around its target
+     **/
+    _positionCamera(pose) {
+      const THREE = window.THREE;
+      const offset = new THREE.Vector3().setFromSphericalCoords(
+        pose.distance,
+        THREE.MathUtils.degToRad(pose.elevation),
+        THREE.MathUtils.degToRad(pose.azimuth)
+      );
+      this._camera.position.set(pose.target[0], pose.target[1], pose.target[2]).add(offset);
+      this._camera.lookAt(pose.target[0], pose.target[1], pose.target[2]);
+      this._pose = pose;
+      this._onChange();
+    }
+  };
+
+  // assets/js/telar-story/cards/text-card.js
+  var TextCard = class {
+    constructor(el, stepIndex) {
+      this.el = el;
+      this.stepIndex = stepIndex;
+      this.messiness = {
+        rot: parseFloat(el.dataset.messinessRot || 0),
+        offX: parseFloat(el.dataset.messinessOffX || 0),
+        offY: parseFloat(el.dataset.messinessOffY || 0)
+      };
+    }
+    /** Slide up into view */
+    center() {
+      const rot = state.layoutMode === "vertical" ? this.messiness.rot * 0.5 : this.messiness.rot;
+      this.el.classList.remove("is-stacked");
+      this.el.classList.add("is-active");
+      this.el.style.transform = this._transform("0", rot);
+    }
+    /** Slide off / behind. */
+    sendBack(direction) {
+      this.el.classList.remove("is-active");
+      if (direction === "backward") {
+        this.el.classList.remove("is-stacked");
+        this.el.style.transform = this._transform("100vh", this.messiness.rot);
+      } else {
+        this.el.classList.add("is-stacked");
+      }
+    }
+    /**
+     * Position from the continuous scroll: 0 while its step is current, sliding
+     * @param {number} scrollProgress - continuous scroll position (0 = first step, 1 = second step, etc.)
+     */
+    scrollPos(scrollProgress) {
+      const distToScroll = this.stepIndex - scrollProgress;
+      const t = Math.min(1, Math.max(0, distToScroll));
+      this.el.style.transform = this._transform(`${t * 100}vh`, this.messiness.rot);
+    }
+    _transform(translateY, rot) {
+      return `translateY(${translateY}) rotate(${rot}deg) translate(${this.messiness.offX}px, ${this.messiness.offY}px)`;
+    }
+  };
+
+  // assets/js/telar-story/cards/card-pool.js
+  var PLATE_TYPES = {
+    model: ModelPlate
+    // image: IiifPlate,
+  };
+  var AHEAD = 2;
+  var BEHIND = 1;
+  var _currentSceneIdx = -1;
+  var _currentStepIdx = -1;
+  var _liveSceneIdxs = /* @__PURE__ */ new Set();
+  var _cards = /* @__PURE__ */ new Map();
+  var _plates = /* @__PURE__ */ new Map();
+  var CARD_SLIDE_MS = 550;
+  var _slideTimer;
+  var _cardStackElem;
+  function enableCardSlide() {
+    _cardStackElem.classList.add("is-animating");
+    clearTimeout(_slideTimer);
+    _slideTimer = setTimeout(() => _cardStackElem.classList.remove("is-animating"), CARD_SLIDE_MS);
+  }
+  function hasPlate(scene) {
+    return scene?.type === "model";
+  }
+  function makePlate(scene) {
+    const Plate2 = PLATE_TYPES[scene.type];
+    return new Plate2(scene.container, scene.objectId, scene.index, scene.z, scene.firstStep, scene.firstStepIdx);
+  }
+  function resizeLivePlates() {
+    for (const i of _liveSceneIdxs) _plates.get(i).resize();
+  }
+  function setWindow(centerIndex) {
+    const window2 = /* @__PURE__ */ new Set();
+    for (let d = -BEHIND; d <= AHEAD; d++) {
+      const sceneIndex = centerIndex + d;
+      const plate = _plates.get(sceneIndex);
+      if (!plate) continue;
+      window2.add(sceneIndex);
+      if (!_liveSceneIdxs.has(sceneIndex)) {
+        plate.load();
+        _liveSceneIdxs.add(sceneIndex);
+      }
+    }
+    for (const i of [..._liveSceneIdxs]) {
+      if (!window2.has(i)) {
+        _plates.get(i).unload();
+        _liveSceneIdxs.delete(i);
+      }
+    }
+  }
+  function initCardPool(storyData, config) {
+    _cardStackElem = document.querySelector(".card-stack");
+    buildScenes(storyData, config);
+    for (const scene of state.scenes) {
+      if (hasPlate(scene)) _plates.set(scene.index, makePlate(scene));
+    }
+    for (const idx in state.textCards) _cards.set(+idx, new TextCard(state.textCards[idx], +idx));
+    for (const idx in state.titleCards) _cards.set(+idx, new TextCard(state.titleCards[idx], +idx));
+    setWindow(getSceneIndex(0));
+    onViewportResize(resizeLivePlates);
+  }
+  function activateCard(stepIndex, animate = false) {
+    if (animate) enableCardSlide();
+    _cards.get(stepIndex)?.center();
+    const sceneIndex = getSceneIndex(stepIndex);
+    _plates.get(sceneIndex)?.goToStep(state.stepsData[stepIndex], animate);
+    if (sceneIndex !== _currentSceneIdx) {
+      _plates.get(_currentSceneIdx)?.sendBack();
+      setWindow(sceneIndex);
+      _plates.get(sceneIndex)?.centerPlate();
+    }
+    _currentSceneIdx = sceneIndex;
+    _currentStepIdx = stepIndex;
+  }
+  function deactivateCard(stepIndex, direction) {
+    _cards.get(stepIndex)?.sendBack(direction);
+  }
+  function returnToIntro() {
+    _plates.get(0)?.sendBack("backward");
+    _cards.get(0)?.sendBack("backward");
+    _currentSceneIdx = -1;
+    _currentStepIdx = -1;
+  }
+  function scrollCardPool(scrollProgress) {
+    const stepsData = state.stepsData;
+    const clamped = Math.min(stepsData.length - 1, scrollProgress);
+    const stepIndex = Math.floor(clamped);
+    const progress = clamped - stepIndex;
+    if (stepIndex !== _currentStepIdx) {
+      const prevStep2 = _currentStepIdx;
+      const direction = stepIndex > prevStep2 ? "forward" : "backward";
+      activateCard(stepIndex, false);
+      if (prevStep2 >= 0) deactivateCard(prevStep2, direction);
+    }
+    if (stepIndex + 1 < stepsData.length && getSceneIndex(stepIndex) === getSceneIndex(stepIndex + 1)) {
+      _plates.get(getSceneIndex(stepIndex))?.scrollContent(progress, stepsData[stepIndex], stepsData[stepIndex + 1]);
+    }
+    for (const [_, card] of _cards) card.scrollPos(scrollProgress);
+    for (const i of _liveSceneIdxs) _plates.get(i).scrollPos(scrollProgress);
+    return { stepIndex, progress };
   }
 
   // assets/js/telar-story/iiif-manifest.js
@@ -888,270 +1591,12 @@
     }
   };
 
-  // assets/js/telar-story/iiif-card.js
-  function _isSane(imageW, imageH, viewportW, viewportH, x, y, zoom) {
-    const fin = (v) => typeof v === "number" && Number.isFinite(v);
-    if (!fin(imageW) || imageW <= 0) return false;
-    if (!fin(imageH) || imageH <= 0) return false;
-    if (!fin(viewportW) || viewportW <= 0) return false;
-    if (!fin(viewportH) || viewportH <= 0) return false;
-    if (!fin(x) || x < 0 || x > 1) return false;
-    if (!fin(y) || y < 0 || y > 1) return false;
-    if (!fin(zoom) || zoom <= 0) return false;
-    return true;
-  }
-  var _CSS_HORIZ_CARD_LEFT = 3 / 100;
-  var _CSS_HORIZ_CARD_WIDTH = 37 / 100;
-  var _CSS_VERT_CARD_H_VH = 40 / 100;
-  var _CSS_VERT_CARD_TOP_FRAC = 1 - _CSS_VERT_CARD_H_VH;
-  function _defaultCardBox(placement, viewportW, viewportH) {
-    if (placement === "horizontal") {
-      return {
-        x: viewportW * _CSS_HORIZ_CARD_LEFT,
-        y: 0,
-        w: viewportW * _CSS_HORIZ_CARD_WIDTH,
-        h: viewportH
-      };
-    }
-    return {
-      x: 0,
-      y: viewportH * _CSS_VERT_CARD_TOP_FRAC,
-      w: viewportW,
-      h: viewportH * _CSS_VERT_CARD_H_VH
-    };
-  }
-  function _deriveCardPlacement(cardBox, viewportW, viewportH) {
-    if (!cardBox) {
-      if (isLandscapeSideCard()) return "horizontal";
-      return state.layoutMode === "vertical" ? "vertical" : "horizontal";
-    }
-    if (cardBox.x + cardBox.w < viewportW * 0.6) return "horizontal";
-    return "vertical";
-  }
-  function computeUncoveredRegion(cardBox, placementMode, viewportW, viewportH) {
-    const box = cardBox !== null && cardBox !== void 0 ? cardBox : _defaultCardBox(placementMode, viewportW, viewportH);
-    if (placementMode === "horizontal") {
-      const visX = box.x + box.w;
-      return { x: visX, y: 0, w: viewportW - visX, h: viewportH };
-    }
-    return { x: 0, y: 0, w: viewportW, h: box.y };
-  }
-  var AUTHORING_ASPECT = 1.053;
-  var FOCAL_DIAMETER_FRAC = 0.9;
-  function computeFocalTarget(x, y, zoom, imageW, imageH, cardBox, placementMode) {
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-    if (!_isSane(imageW, imageH, viewportW, viewportH, x, y, zoom)) {
-      return null;
-    }
-    const region = computeUncoveredRegion(cardBox, placementMode, viewportW, viewportH);
-    const imageAspect = imageW / imageH;
-    const homeZoomAuth = imageAspect / AUTHORING_ASPECT;
-    const frameWidthImg = imageW / (homeZoomAuth * zoom);
-    const diameterImg = FOCAL_DIAMETER_FRAC * frameWidthImg;
-    const focalImg = { x: x * imageW, y: y * imageH };
-    return { focalImg, diameterImg, region, imageW, imageH };
-  }
-  function _clampFocalPx(region, edges, ideal) {
-    const loX = region.x + region.w - edges.eRight;
-    const hiX = region.x + edges.eLeft;
-    const loY = region.y + region.h - edges.eBottom;
-    const hiY = region.y + edges.eTop;
-    return {
-      x: loX <= hiX ? Math.max(loX, Math.min(hiX, ideal.x)) : ideal.x,
-      y: loY <= hiY ? Math.max(loY, Math.min(hiY, ideal.y)) : ideal.y
-    };
-  }
-  function _applyFocalTarget(viewerCard, x, y, zoom, immediate) {
-    const v = viewerCard.osdViewer;
-    const av = viewerCard.osdWrapper;
-    const source = v.world.getItemAt(0)?.source;
-    if (!source?.width || !source?.height) return false;
-    const imgW = source.width;
-    const imgH = source.height;
-    if (state.activeTitleCardIndex != null) return false;
-    const viewportW = window.innerWidth;
-    const viewportH = window.innerHeight;
-    const r = state.cardOverlayRect;
-    const cardBox = r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null;
-    const placementMode = _deriveCardPlacement(cardBox, viewportW, viewportH);
-    const target = computeFocalTarget(x, y, zoom, imgW, imgH, cardBox, placementMode);
-    if (!target) return false;
-    const { focalImg, diameterImg, region } = target;
-    const vp = v.viewport;
-    const OSD = window.OpenSeadragon;
-    const rect = av.containerEl.getBoundingClientRect();
-    const s_tgt = Math.min(region.w, region.h) / diameterImg;
-    const s_cap = Math.min(rect.width / imgW, rect.height / imgH);
-    const s = Math.max(s_tgt, s_cap);
-    const CB = { x: region.x + region.w / 2, y: region.y + region.h / 2 };
-    const edges = {
-      eLeft: focalImg.x * s,
-      eRight: (imgW - focalImg.x) * s,
-      eTop: focalImg.y * s,
-      eBottom: (imgH - focalImg.y) * s
-    };
-    const F = _clampFocalPx(region, edges, CB);
-    const visW = rect.width / s;
-    const visH = rect.height / s;
-    const topLeft = { x: focalImg.x - F.x / s, y: focalImg.y - F.y / s };
-    const targetVp = vp.imageToViewportRectangle(
-      new OSD.Rect(topLeft.x, topLeft.y, visW, visH)
-    );
-    vp.fitBounds(targetVp, immediate);
-    return true;
-  }
-  function deactivateIiifCard(viewerCard, direction) {
-    if (!viewerCard || !viewerCard.element) return;
-    viewerCard.element.classList.remove("is-active");
-    if (direction === "backward") {
-      viewerCard.element.style.transform = "translateY(100%)";
-    }
-  }
-  function snapIiifToPosition(viewerCard, x, y, zoom) {
-    if (!viewerCard || !viewerCard.osdViewer) {
-      console.warn("snapIiifToPosition: viewer not ready for snap");
-      return;
-    }
-    _applyFocalTarget(viewerCard, x, y, zoom, true);
-  }
-  function animateIiifToPosition(viewerCard, x, y, zoom) {
-    if (!viewerCard || !viewerCard.osdViewer) {
-      console.warn("animateIiifToPosition: viewer not ready for animation");
-      return;
-    }
-    const osdViewer = viewerCard.osdViewer;
-    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    osdViewer.gestureSettingsMouse.clickToZoom = false;
-    osdViewer.gestureSettingsTouch.clickToZoom = false;
-    const originalAnimationTime = osdViewer.animationTime;
-    const originalSpringStiffness = osdViewer.springStiffness;
-    osdViewer.animationTime = 4;
-    osdViewer.springStiffness = 0.8;
-    _applyFocalTarget(viewerCard, x, y, zoom, prefersReduced);
-    setTimeout(() => {
-      osdViewer.animationTime = originalAnimationTime;
-      osdViewer.springStiffness = originalSpringStiffness;
-    }, 4100);
-  }
-  function lerpIiifPosition(stepIndex, progress, stepsData) {
-    if (progress < 1e-3) return;
-    const stepA = stepsData[stepIndex];
-    const stepB = stepsData[stepIndex + 1];
-    if (!stepA || !stepB) return;
-    const objectIdA = stepA.object || stepA.objectId || "";
-    const objectIdB = stepB.object || stepB.objectId || "";
-    if (objectIdA !== objectIdB) return;
-    const xA = parseFloat(stepA.x), yA = parseFloat(stepA.y), zA = parseFloat(stepA.zoom);
-    const xB = parseFloat(stepB.x), yB = parseFloat(stepB.y), zB = parseFloat(stepB.zoom);
-    if (isNaN(xA) || isNaN(yA) || isNaN(zA)) return;
-    if (isNaN(xB) || isNaN(yB) || isNaN(zB)) return;
-    const x = xA + (xB - xA) * progress;
-    const y = yA + (yB - yA) * progress;
-    const zoom = zA + (zB - zA) * progress;
-    const sceneIndex = state.stepToScene[stepIndex];
-    if (sceneIndex === void 0 || sceneIndex < 0) return;
-    const viewerCard = state.viewerCards.find((vc) => vc.sceneIndex === sceneIndex);
-    if (!viewerCard || !viewerCard.isReady) return;
-    snapIiifToPosition(viewerCard, x, y, zoom);
-  }
-  function _reSnapActiveViewer() {
-    const viewerCard = state.viewerCards.find(
-      (vc) => vc.element && vc.element.classList.contains("is-active")
-    );
-    if (!viewerCard || !viewerCard.isReady) return;
-    const activeTextCard = document.querySelector(".text-card.is-active");
-    if (!activeTextCard) return;
-    const stepIndex = parseInt(activeTextCard.dataset.stepIndex, 10);
-    if (isNaN(stepIndex)) return;
-    const steps = (window.storyData?.steps || []).filter((s) => !s._metadata);
-    const step = steps[stepIndex];
-    if (!step) return;
-    const x = parseFloat(step.x);
-    const y = parseFloat(step.y);
-    const zoom = parseFloat(step.zoom);
-    if (isNaN(x) || isNaN(y) || isNaN(zoom)) return;
-    snapIiifToPosition(viewerCard, x, y, zoom);
-  }
-  onViewportResize(() => {
-    _reSnapActiveViewer();
-  });
-  onLayoutChange(() => {
-    requestAnimationFrame(() => {
-      const activeCard = document.querySelector(".text-card.is-active");
-      state.cardOverlayRect = activeCard ? activeCard.getBoundingClientRect() : null;
-      _reSnapActiveViewer();
-    });
-  });
-
-  // assets/js/telar-story/text-card.js
-  function isFullObjectMode(stepData) {
-    const zoom = stepData.zoom;
-    if (stepData.x === void 0 && stepData.y === void 0 && zoom === void 0) {
-      return true;
-    }
-    if (zoom === void 0 || zoom === "" || zoom === null) return true;
-    const zoomNum = parseFloat(zoom);
-    if (isNaN(zoomNum) || zoomNum <= 1) return true;
-    return false;
-  }
-
   // assets/js/telar-story/video-card.js
   var _cs = getComputedStyle(document.documentElement);
   var videoPadFactor = parseFloat(_cs.getPropertyValue("--telar-video-pad-factor").trim()) || 0.025;
   var videoStackMaxH = parseFloat(_cs.getPropertyValue("--telar-video-stack-max-h").trim()) || 0.58;
   var videoCardFracSide = parseFloat(_cs.getPropertyValue("--telar-video-card-frac-side").trim()) || 0.35;
   var _videoPlayers = [];
-  var MAX_VIDEO_PLAYERS = 3;
-  function loadYouTubeAPI() {
-    if (window._ytApiPromise) return window._ytApiPromise;
-    window._ytApiPromise = new Promise((resolve) => {
-      if (window.YT && window.YT.Player) {
-        resolve();
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = "https://www.youtube.com/iframe_api";
-      script.async = true;
-      document.head.appendChild(script);
-      const prev = window.onYouTubeIframeAPIReady;
-      window.onYouTubeIframeAPIReady = function() {
-        if (typeof prev === "function") prev();
-        resolve();
-      };
-    });
-    return window._ytApiPromise;
-  }
-  function detectYouTubeAspect(videoId) {
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        if (img.naturalWidth >= 320 && img.naturalHeight >= 180) {
-          resolve(img.naturalWidth / img.naturalHeight);
-        } else {
-          resolve(null);
-        }
-      };
-      img.onerror = () => resolve(null);
-      img.src = `https://i.ytimg.com/vi/${videoId}/maxresdefault.jpg`;
-    });
-  }
-  function loadVimeoAPI() {
-    if (window._vimeoApiPromise) return window._vimeoApiPromise;
-    window._vimeoApiPromise = new Promise((resolve, reject) => {
-      if (window.Vimeo && window.Vimeo.Player) {
-        resolve();
-        return;
-      }
-      const script = document.createElement("script");
-      script.src = "https://player.vimeo.com/api/player.js";
-      script.async = true;
-      script.onload = () => resolve();
-      script.onerror = () => reject(new Error("Failed to load Vimeo Player API"));
-      document.head.appendChild(script);
-    });
-    return window._vimeoApiPromise;
-  }
   function computeVideoLayout(W, H, aspectRatio) {
     if (state.layoutMode === "vertical") {
       return _computeStackedLayout(W, H, aspectRatio);
@@ -1247,424 +1692,6 @@
     }
     return _buildStackedResult(W, H, pad, stackVidW, stackVidH);
   }
-  function buildYouTubeEmbedConfig(videoId, clipStart, clipEnd, loop) {
-    return {
-      videoId,
-      playerVars: {
-        start: clipStart || 0,
-        autoplay: 0,
-        mute: 0,
-        // loop/playlist omitted — segment looping handled by rAF polling
-        // (YouTube loop playerVar loops the whole video, not the clip)
-        controls: 1,
-        rel: 0,
-        modestbranding: 1
-      }
-    };
-  }
-  function buildGDriveEmbedUrl(fileId) {
-    return `https://drive.google.com/file/d/${fileId}/preview`;
-  }
-  function applyClipEndDim(plateEl) {
-    let overlay = plateEl.querySelector(".clip-end-overlay");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.className = "clip-end-overlay";
-      plateEl.appendChild(overlay);
-    }
-    void overlay.offsetHeight;
-    overlay.classList.add("visible");
-  }
-  function removeClipEndDim(plateEl) {
-    const overlay = plateEl.querySelector(".clip-end-overlay");
-    if (overlay) {
-      overlay.classList.remove("visible");
-    }
-  }
-  function createVideoPlayer(plateEl, cardType, videoId, options = {}) {
-    const {
-      clipStart = 0,
-      clipEnd,
-      loop = false,
-      onPlay = () => {
-      },
-      onTimeUpdate = () => {
-      },
-      onEnded = () => {
-      },
-      onAutoplayBlocked = () => {
-      },
-      sceneIndex = 0,
-      sourceUrl = ""
-    } = options;
-    let wrapper;
-    if (cardType === "youtube") {
-      wrapper = _createYouTubePlayer(plateEl, videoId, {
-        clipStart,
-        clipEnd,
-        loop,
-        onPlay,
-        onTimeUpdate,
-        onEnded,
-        onAutoplayBlocked,
-        sceneIndex
-      });
-    } else if (cardType === "vimeo") {
-      wrapper = _createVimeoPlayer(plateEl, videoId, {
-        clipStart,
-        clipEnd,
-        loop,
-        onPlay,
-        onTimeUpdate,
-        onEnded,
-        onAutoplayBlocked,
-        sceneIndex,
-        sourceUrl
-      });
-    } else if (cardType === "google-drive") {
-      wrapper = _createGDriveEmbed(plateEl, videoId, sceneIndex);
-    } else {
-      console.error("createVideoPlayer: unknown cardType", cardType);
-      return null;
-    }
-    _videoPlayers.push(wrapper);
-    _enforcePoolLimit(sceneIndex);
-    _applyVideoLayout(plateEl);
-    return wrapper;
-  }
-  function destroyVideoPlayer(wrapper) {
-    if (!wrapper) return;
-    try {
-      if (wrapper.type === "youtube" && wrapper.player) {
-        if (wrapper._rafId) cancelAnimationFrame(wrapper._rafId);
-        if (wrapper._autoplayTimeout) clearTimeout(wrapper._autoplayTimeout);
-        wrapper.player.destroy();
-      } else if (wrapper.type === "vimeo" && wrapper.player) {
-        wrapper.player.destroy();
-      } else if (wrapper.type === "google-drive") {
-        const iframe = wrapper.element.querySelector("iframe.video-iframe");
-        if (iframe) iframe.remove();
-      }
-    } catch (e) {
-      console.warn("destroyVideoPlayer: error during destroy", e);
-    }
-    const idx = _videoPlayers.indexOf(wrapper);
-    if (idx !== -1) _videoPlayers.splice(idx, 1);
-  }
-  function _showVideoPlayOverlay(plateEl) {
-    const existing = plateEl.querySelector(".video-play-overlay");
-    if (existing) {
-      existing.style.display = "flex";
-      return;
-    }
-    const overlayEl = document.createElement("div");
-    overlayEl.className = "video-play-overlay";
-    overlayEl.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:1;";
-    const _vObjectsData = window.objectsData || [];
-    const _vObj = _vObjectsData.find((o) => o.object_id === plateEl.dataset.object) || {};
-    const _vAlt = _vObj.alt_text || _vObj.title || "video";
-    const overlayBtn = document.createElement("button");
-    overlayBtn.setAttribute("aria-label", `Play ${_vAlt}`);
-    overlayBtn.type = "button";
-    overlayBtn.style.cssText = "min-height:44px;padding:0.5rem 1.25rem;border-radius:20px;background:rgba(255,255,255,0.6);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);border:none;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,0.2);display:flex;align-items:center;gap:8px;color:#333;font-family:var(--font-body);font-size:0.9rem;";
-    overlayBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="var(--color-link)" xmlns="http://www.w3.org/2000/svg"><polygon points="5,3 19,12 5,21"/></svg><span>Play</span>';
-    overlayEl.appendChild(overlayBtn);
-    plateEl.appendChild(overlayEl);
-    overlayBtn.addEventListener("click", () => {
-      state.hasUserInteracted = true;
-      overlayEl.style.display = "none";
-      const wrapper = _getWrapperForPlate(plateEl);
-      if (wrapper && wrapper.player) {
-        try {
-          if (wrapper.type === "youtube") {
-            wrapper.player.playVideo();
-          } else if (wrapper.type === "vimeo") {
-            wrapper.player.play();
-          }
-        } catch (e) {
-        }
-      }
-    });
-  }
-  function activateVideoCard(plateEl, sceneIndex) {
-    plateEl.style.transform = "translateY(0)";
-    plateEl.classList.add("is-active");
-    _applyVideoLayout(plateEl);
-    if (state.layoutMode === "vertical" || state.isEmbed) {
-      if (!state.hasUserInteracted) {
-        _showVideoPlayOverlay(plateEl);
-        return;
-      }
-    }
-    const wrapper = _getWrapperForPlate(plateEl);
-    if (wrapper) {
-      try {
-        if (wrapper.type === "youtube" && wrapper.player) {
-          wrapper.player.playVideo();
-        } else if (wrapper.type === "vimeo" && wrapper.player) {
-          wrapper.player.play().catch(() => {
-          });
-        }
-      } catch (e) {
-      }
-    }
-  }
-  function deactivateVideoCard(plateEl) {
-    plateEl.classList.remove("is-active");
-    const wrapper = _getWrapperForPlate(plateEl);
-    if (!wrapper) return;
-    try {
-      if (wrapper.type === "youtube" && wrapper.player) {
-        wrapper.player.pauseVideo();
-      } else if (wrapper.type === "vimeo" && wrapper.player) {
-        wrapper.player.pause();
-      }
-    } catch (e) {
-    }
-  }
-  function updateVideoClip(plateEl, clipStart, clipEnd, loop) {
-    const wrapper = _getWrapperForPlate(plateEl);
-    if (!wrapper) return;
-    if (wrapper.clipStart === clipStart && wrapper.clipEnd === clipEnd && wrapper.loop === loop) {
-      return;
-    }
-    wrapper.clipStart = clipStart;
-    wrapper.clipEnd = clipEnd;
-    wrapper.loop = loop;
-    plateEl.dataset.clipStart = String(clipStart);
-    plateEl.dataset.clipEnd = String(clipEnd);
-    plateEl.dataset.loop = String(loop);
-    removeClipEndDim(plateEl);
-    try {
-      if (wrapper.type === "youtube" && wrapper.player) {
-        wrapper.player.seekTo(clipStart || 0, true);
-        if (!wrapper._rafId) {
-          wrapper.player.playVideo();
-        }
-      } else if (wrapper.type === "vimeo" && wrapper.player) {
-        wrapper.player.setCurrentTime(clipStart || 0.01).catch(() => {
-        });
-        wrapper.player.play().catch(() => {
-        });
-      }
-    } catch (e) {
-    }
-  }
-  function _createYouTubePlayer(plateEl, videoId, opts) {
-    const { clipStart, clipEnd, loop, onPlay, onTimeUpdate, onEnded, onAutoplayBlocked, sceneIndex } = opts;
-    const container = document.createElement("div");
-    container.className = "video-iframe";
-    plateEl.appendChild(container);
-    detectYouTubeAspect(videoId).then((aspect) => {
-      if (aspect) {
-        plateEl.dataset.aspectRatio = String(aspect);
-        delete plateEl.dataset.videoLetterbox;
-      } else {
-        plateEl.dataset.videoLetterbox = "true";
-      }
-      _applyVideoLayout(plateEl);
-    });
-    const wrapper = {
-      type: "youtube",
-      element: plateEl,
-      player: null,
-      sceneIndex,
-      clipStart,
-      clipEnd,
-      loop,
-      _rafId: null,
-      _autoplayTimeout: null,
-      _playReceived: false,
-      destroy() {
-        destroyVideoPlayer(this);
-      }
-    };
-    loadYouTubeAPI().then(() => {
-      const cfg = buildYouTubeEmbedConfig(videoId, clipStart, clipEnd, loop);
-      wrapper.player = new window.YT.Player(container, {
-        videoId: cfg.videoId,
-        playerVars: cfg.playerVars,
-        events: {
-          onReady: (event) => {
-            wrapper._autoplayTimeout = setTimeout(() => {
-              if (!wrapper._playReceived) {
-                onAutoplayBlocked();
-              }
-            }, 2e3);
-          },
-          onStateChange: (event) => {
-            if (event.data === window.YT.PlayerState.PLAYING) {
-              wrapper._playReceived = true;
-              if (wrapper._autoplayTimeout) {
-                clearTimeout(wrapper._autoplayTimeout);
-                wrapper._autoplayTimeout = null;
-              }
-              onPlay();
-              if (wrapper.clipEnd) {
-                _startYouTubePolling(wrapper, onTimeUpdate, onEnded);
-              }
-            } else if (event.data === window.YT.PlayerState.PAUSED || event.data === window.YT.PlayerState.ENDED) {
-              if (wrapper._rafId) {
-                cancelAnimationFrame(wrapper._rafId);
-                wrapper._rafId = null;
-              }
-            }
-          }
-        }
-      });
-    });
-    return wrapper;
-  }
-  function _startYouTubePolling(wrapper, onTimeUpdate, onEnded) {
-    if (wrapper._rafId) cancelAnimationFrame(wrapper._rafId);
-    function poll() {
-      if (!wrapper.player) return;
-      try {
-        const currentTime = wrapper.player.getCurrentTime();
-        const duration = wrapper.player.getDuration();
-        onTimeUpdate(currentTime, duration);
-        if (wrapper.clipEnd && currentTime >= wrapper.clipEnd) {
-          if (wrapper.loop) {
-            wrapper.player.seekTo(wrapper.clipStart || 0, true);
-          } else {
-            wrapper.player.pauseVideo();
-            onEnded();
-            return;
-          }
-        }
-      } catch (e) {
-        return;
-      }
-      wrapper._rafId = requestAnimationFrame(poll);
-    }
-    wrapper._rafId = requestAnimationFrame(poll);
-  }
-  function _createVimeoPlayer(plateEl, videoId, opts) {
-    const { clipStart, clipEnd, loop, onPlay, onTimeUpdate, onEnded, onAutoplayBlocked, sceneIndex, sourceUrl } = opts;
-    const container = document.createElement("div");
-    container.className = "video-iframe";
-    plateEl.appendChild(container);
-    const wrapper = {
-      type: "vimeo",
-      element: plateEl,
-      player: null,
-      sceneIndex,
-      clipStart,
-      clipEnd,
-      loop,
-      destroy() {
-        destroyVideoPlayer(this);
-      }
-    };
-    loadVimeoAPI().then(() => {
-      const playerOpts = {
-        autoplay: false,
-        loop: false,
-        controls: true
-      };
-      const hashMatch = sourceUrl && sourceUrl.match(/vimeo\.com\/\d+\/([a-f0-9]+)/i);
-      if (hashMatch) {
-        playerOpts.url = `https://vimeo.com/${videoId}/${hashMatch[1]}`;
-      } else {
-        playerOpts.id = parseInt(videoId, 10) || videoId;
-      }
-      const vimeoPlayer = new window.Vimeo.Player(container, playerOpts);
-      wrapper.player = vimeoPlayer;
-      vimeoPlayer.ready().then(() => {
-        return Promise.all([
-          vimeoPlayer.getVideoWidth(),
-          vimeoPlayer.getVideoHeight()
-        ]).then(([w, h]) => {
-          if (w && h) {
-            plateEl.dataset.aspectRatio = String(w / h);
-            _applyVideoLayout(plateEl);
-          }
-        });
-      }).then(() => {
-        if (clipStart) {
-          vimeoPlayer.setCurrentTime(clipStart).catch(() => {
-          });
-        }
-      });
-      vimeoPlayer.on("play", () => {
-        onPlay();
-      });
-      vimeoPlayer.on("timeupdate", ({ seconds, duration }) => {
-        onTimeUpdate(seconds, duration);
-        if (wrapper.clipEnd && seconds >= wrapper.clipEnd) {
-          if (wrapper.loop) {
-            vimeoPlayer.setCurrentTime(wrapper.clipStart || 0.01).catch(() => {
-            });
-          } else {
-            vimeoPlayer.pause().catch(() => {
-            });
-            onEnded();
-          }
-        }
-      });
-      vimeoPlayer.play().catch((err) => {
-        if (err && (err.name === "NotAllowedError" || err.name === "PasswordError")) {
-          onAutoplayBlocked();
-        }
-      });
-    }).catch((err) => {
-      console.error("Failed to load Vimeo API:", err);
-    });
-    return wrapper;
-  }
-  function _createGDriveEmbed(plateEl, videoId, sceneIndex) {
-    const iframe = document.createElement("iframe");
-    iframe.className = "video-iframe";
-    iframe.src = buildGDriveEmbedUrl(videoId);
-    iframe.allow = "autoplay";
-    iframe.allowFullscreen = true;
-    iframe.style.cssText = "width:100%;height:100%;border:none;border-radius:4px";
-    plateEl.dataset.videoLetterbox = "true";
-    plateEl.appendChild(iframe);
-    return {
-      type: "google-drive",
-      element: plateEl,
-      player: null,
-      sceneIndex,
-      destroy() {
-        destroyVideoPlayer(this);
-      }
-    };
-  }
-  function _enforcePoolLimit(currentScene) {
-    while (_videoPlayers.length > MAX_VIDEO_PLAYERS) {
-      let farthestIdx = 0;
-      let maxDist = -1;
-      for (let i = 0; i < _videoPlayers.length; i++) {
-        const dist = Math.abs(_videoPlayers[i].sceneIndex - currentScene);
-        if (dist > maxDist) {
-          maxDist = dist;
-          farthestIdx = i;
-        }
-      }
-      const evicted = _videoPlayers.splice(farthestIdx, 1)[0];
-      _evictPlayer(evicted);
-    }
-  }
-  function _evictPlayer(wrapper) {
-    try {
-      if (wrapper.type === "youtube" && wrapper.player) {
-        if (wrapper._rafId) cancelAnimationFrame(wrapper._rafId);
-        if (wrapper._autoplayTimeout) clearTimeout(wrapper._autoplayTimeout);
-        wrapper.player.destroy();
-      } else if (wrapper.type === "vimeo" && wrapper.player) {
-        wrapper.player.destroy();
-      } else if (wrapper.type === "google-drive") {
-        const iframe = wrapper.element.querySelector("iframe.video-iframe");
-        if (iframe) iframe.remove();
-      }
-    } catch (e) {
-      console.warn("_evictPlayer: error during evict", e);
-    }
-  }
-  function _getWrapperForPlate(plateEl) {
-    return _videoPlayers.find((w) => w.element === plateEl) || null;
-  }
   function _applyVideoLayout(plateEl) {
     const W = window.innerWidth;
     const H = window.innerHeight;
@@ -1697,1953 +1724,8 @@
     }
   });
 
-  // assets/js/telar-story/audio-card.js
-  var _cs2 = getComputedStyle(document.documentElement);
-  var audioHeightMobile = parseFloat(_cs2.getPropertyValue("--telar-audio-height-mobile").trim()) || 0.35;
-  var audioHeightResize = parseFloat(_cs2.getPropertyValue("--telar-audio-height-resize").trim()) || 0.5;
-  function _audioHeightFraction() {
-    return state.layoutMode === "vertical" || state.isEmbed ? audioHeightMobile : audioHeightResize;
-  }
-  var _audioPlayers = [];
-  var MAX_AUDIO_PLAYERS = 3;
-  var _sharedAudioContext = null;
-  function loadWaveSurferAPI() {
-    if (window._wsApiPromise) return window._wsApiPromise;
-    window._wsApiPromise = new Promise((resolve, reject) => {
-      if (window.WaveSurfer) {
-        resolve();
-        return;
-      }
-      const basePath = getBasePath();
-      const script = document.createElement("script");
-      script.src = `${basePath}/assets/vendor/wavesurfer/wavesurfer.min.js`;
-      script.async = true;
-      script.onload = () => {
-        const rScript = document.createElement("script");
-        rScript.src = `${basePath}/assets/vendor/wavesurfer/plugins/regions.min.js`;
-        rScript.async = true;
-        rScript.onload = () => resolve();
-        rScript.onerror = () => reject(new Error("WaveSurfer Regions plugin failed to load"));
-        document.head.appendChild(rScript);
-      };
-      script.onerror = () => reject(new Error("WaveSurfer failed to load"));
-      document.head.appendChild(script);
-    });
-    return window._wsApiPromise;
-  }
-  function formatElapsedTime(seconds) {
-    const total = Math.floor(seconds);
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${s.toString().padStart(2, "0")}`;
-  }
-  function deriveThemeColors(accentHex, barHex = "#ffffff") {
-    const r = parseInt(accentHex.slice(1, 3), 16);
-    const g = parseInt(accentHex.slice(3, 5), 16);
-    const b = parseInt(accentHex.slice(5, 7), 16);
-    const bgR = Math.round(r * 0.7);
-    const bgG = Math.round(g * 0.7);
-    const bgB = Math.round(b * 0.7);
-    const bR = parseInt(barHex.slice(1, 3), 16);
-    const bG = parseInt(barHex.slice(3, 5), 16);
-    const bB = parseInt(barHex.slice(5, 7), 16);
-    const upR = Math.round(bgR * 0.75 + bR * 0.25);
-    const upG = Math.round(bgG * 0.75 + bG * 0.25);
-    const upB = Math.round(bgB * 0.75 + bB * 0.25);
-    return {
-      playedColor: barHex,
-      // played bars: theme button text colour
-      unplayedColor: `rgb(${upR}, ${upG}, ${upB})`,
-      // unplayed bars: opaque blended tint
-      backgroundColor: `rgb(${bgR}, ${bgG}, ${bgB})`,
-      patternColor: "rgba(255, 255, 255, 0.12)",
-      clipRegionColor: "rgba(255, 255, 255, 0.08)"
-      // subtle clip region highlight
-    };
-  }
-  function _buildPatternDataUri(fillColor) {
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 543 380"><path d="M542.955,145.508l-83.257,-0.001l13.365,45.375l-12.615,43.868l82.485,0l-0,10.507l-81.743,0l7.56,40.133l-7.582,38.235l81.765,1.125l-0,10.5l-82.485,0l12.742,44.25l-14.25,0l-13.875,-44.25l-12.375,0l0,44.25l-14.25,0l0,-44.25l-52.492,0l-6.75,44.25l-14.25,0l6.75,-44.25l-41.993,0l6.75,44.25l-14.25,0l-6.75,-44.25l-88.492,0l-0,44.25l-14.25,0l-0,-44.25l-59.993,0l0,44.25l-14.25,0l0,-44.25l-34.492,0l-0,44.25l-13.5,0l-0,-44.25l-70.478,0l0,-10.5l69.368,0l1.125,-1.125l-0,-78.375l-70.493,0l0,-10.5l69.368,0l0.375,-89.25l-69.743,0l0,-10.5l69.743,0l0.75,-79.5l-70.493,0l0,-10.5l69.368,0l1.162,-2.588l-0.037,-42.412l13.5,0l-0.038,42.412l1.163,2.588l33.367,0l0,-44.993l14.25,0.001l0,45l59.993,-0l-0,-45l14.25,-0l-0,45l88.492,-0l6.743,-45l14.25,-0l-6.75,45l41.992,-0l-6.742,-45l14.25,-0l6.75,45l52.492,-0l0,-45l14.25,-0l0.375,45l12.375,-0l13.493,-45l14.25,-0l-12.743,44.992l82.485,0l0,10.508l-81.742,-0l7.522,38.594l-8.272,40.905l82.507,0l0,10.5Zm-424.47,-90l-34.492,0.001l-0,79.499l34.492,0l0,-79.5Zm74.243,0.001l-59.993,-0l0,79.499l59.993,0l-0,-79.5Zm101.242,0.001l-86.992,-0l-0.75,79.499l86.992,0l-5.317,-38.625l6.067,-40.875Zm59.243,79.508l6.48,-40.23l-6.068,-38.565l-45.337,-0.622l-6.105,40.83l5.272,38.595l45.75,-0l0.008,-0.008Zm65.242,-79.507l-50.242,-0l5.842,38.632l-6.592,40.868l50.242,-0l0.75,-79.5Zm13.493,79.5l13.875,-0l9.135,-40.223l-8.385,-39.277l-13.875,-0l-0.75,79.5Zm-313.463,10.5l-34.492,-0l-0,89.25l34.492,-0l0,-89.25Zm14.25,-0l0,89.25l59.993,-0l-0,-89.25l-59.993,-0Zm162.728,89.25l6.375,-44.655l-6.503,-43.35l-1.005,-1.245l-88.117,-0l0.75,89.25l88.5,-0Zm55.5,-89.25l-41.243,-0l6.353,44.602l-6.353,44.648l41.993,-0l-7.418,-46.208l6.668,-43.042Zm66.742,-0l-52.492,-0l-6.593,43.132l7.343,46.118l52.492,-0l-0.75,-89.25Zm27.743,89.25l13.17,-44.61l-14.295,-44.64l-12.375,-0l1.125,89.25l12.375,-0Zm-326.963,10.5l-34.492,-0l-0,79.5l34.492,-0l0,-79.5Zm74.243,-0l-59.993,-0l0,79.5l59.993,-0l-0,-79.5Zm101.242,-0l-86.992,-0l-0,79.5l86.992,-0l-5.917,-40.043l5.917,-39.457Zm14.28,79.462l45.383,-0.66l6.24,-39.345l-6.615,-39.135l-44.97,-0.24l-5.79,39.42l5.745,39.96l0.007,0Zm110.205,-79.462l-50.242,-0l6.022,40.087l-6.022,39.413l50.242,-0l0,-79.5Zm14.243,79.5l13.875,-0l8.542,-40.05l-8.542,-39.45l-13.875,-0l-0,79.5Z" fill="${fillColor}" fill-rule="nonzero"/></svg>`;
-    return `url("data:image/svg+xml,${encodeURIComponent(svg)}")`;
-  }
-  var _icons = {
-    play: '<path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/>',
-    pause: '<rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/>',
-    "rotate-ccw": '<path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/>',
-    "volume-2": '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.364 18.364a9 9 0 0 0 0-12.728"/>',
-    "volume-x": '<path d="M11 4.702a.705.705 0 0 0-1.203-.498L6.413 7.587A1.4 1.4 0 0 1 5.416 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2.416a1.4 1.4 0 0 1 .997.413l3.383 3.384A.705.705 0 0 0 11 19.298z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/>'
-  };
-  function _svg(name, size = 24) {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${_icons[name]}</svg>`;
-  }
-  function buildAudioControlsHTML() {
-    return `<div class="audio-controls">
-  <button class="audio-btn audio-btn-play" aria-label="Play" type="button">${_svg("play", 22)}</button>
-  <button class="audio-btn audio-btn-restart" aria-label="Restart from beginning" type="button">${_svg("rotate-ccw", 20)}</button>
-  <button class="audio-btn audio-btn-mute" aria-label="Mute audio" type="button">${_svg("volume-2", 20)}</button>
-</div>`;
-  }
-  function getSharedAudioContext() {
-    if (!_sharedAudioContext) {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      _sharedAudioContext = new AudioContextClass();
-    }
-    return _sharedAudioContext;
-  }
-  function createAudioPlayer(plateEl, audioUrl, peaksUrl, options = {}) {
-    const {
-      clipStart = 0,
-      clipEnd,
-      loop = false,
-      sceneIndex = 0,
-      isEmbed = false,
-      onPlay = () => {
-      },
-      onTimeUpdate = () => {
-      },
-      onEnded = () => {
-      },
-      onAutoplayBlocked = () => {
-      },
-      onError = () => {
-      }
-    } = options;
-    const wrapper = {
-      type: "audio",
-      element: plateEl,
-      ws: null,
-      sceneIndex,
-      clipStart,
-      clipEnd,
-      loop,
-      isEmbed,
-      _lastElapsedSecond: -1,
-      _fadeTimer: null,
-      _destroyed: false,
-      destroy() {
-        destroyAudioPlayer(this);
-      }
-    };
-    _audioPlayers.push(wrapper);
-    _enforceAudioPoolLimit(sceneIndex);
-    loadWaveSurferAPI().then(() => {
-      if (wrapper._destroyed) return;
-      const peaksFetch = peaksUrl ? fetch(peaksUrl).then((r) => r.ok ? r.json() : null).catch(() => null) : Promise.resolve(null);
-      peaksFetch.then((peaksData) => {
-        if (wrapper._destroyed) return;
-        const styles = getComputedStyle(document.documentElement);
-        const accentColor = styles.getPropertyValue("--color-link").trim() || "#883C36";
-        const barColor = styles.getPropertyValue("--color-button-text").trim() || "#ffffff";
-        const colors = deriveThemeColors(accentColor, barColor);
-        const patternUri = _buildPatternDataUri(colors.patternColor);
-        plateEl.style.background = `${colors.backgroundColor} ${patternUri} repeat`;
-        plateEl.style.backgroundSize = "20px auto";
-        let waveContainer = plateEl.querySelector(".waveform-container");
-        if (!waveContainer) {
-          waveContainer = document.createElement("div");
-          waveContainer.className = "waveform-container";
-          waveContainer.setAttribute("aria-hidden", "true");
-          plateEl.appendChild(waveContainer);
-        }
-        const regionsPlugin = window.WaveSurfer.Regions.create();
-        const ws = window.WaveSurfer.create({
-          container: waveContainer,
-          url: audioUrl,
-          peaks: peaksData ? peaksData.peaks : void 0,
-          waveColor: colors.unplayedColor,
-          progressColor: colors.playedColor,
-          cursorWidth: 0,
-          // hide cursor line — progress shown via bar colour change
-          barWidth: 4,
-          barGap: 5,
-          barRadius: 5,
-          height: Math.round(window.innerHeight * _audioHeightFraction()),
-          interact: false,
-          normalize: true,
-          backend: "WebAudio",
-          audioContext: getSharedAudioContext(),
-          plugins: [regionsPlugin]
-        });
-        wrapper.ws = ws;
-        wrapper._regionsPlugin = regionsPlugin;
-        wrapper._colors = colors;
-        if (plateEl.classList.contains("is-active")) {
-          activateAudioCard(plateEl, wrapper.sceneIndex);
-        }
-        if (clipStart !== void 0 && clipEnd) {
-          ws.on("ready", () => {
-            regionsPlugin.addRegion({
-              start: clipStart,
-              end: clipEnd,
-              color: colors.clipRegionColor,
-              drag: false,
-              resize: false
-            });
-          });
-        }
-        ws.on("timeupdate", (currentTime) => {
-          const elapsedSecond = Math.floor(currentTime);
-          if (elapsedSecond !== wrapper._lastElapsedSecond) {
-            wrapper._lastElapsedSecond = elapsedSecond;
-            onTimeUpdate(currentTime);
-            const elapsedEl2 = plateEl.querySelector(".audio-elapsed");
-            if (elapsedEl2)
-              elapsedEl2.textContent = formatElapsedTime(currentTime);
-          }
-          if (wrapper.clipEnd && currentTime >= wrapper.clipEnd) {
-            if (wrapper.loop) {
-              ws.setTime(wrapper.clipStart || 0);
-            } else {
-              ws.pause();
-              applyAudioClipEndDim(plateEl);
-              onEnded();
-            }
-          }
-        });
-        ws.on("play", () => {
-          onPlay();
-          removeAudioClipEndDim(plateEl);
-          const playBtn = plateEl.querySelector(".audio-btn-play");
-          if (playBtn) {
-            playBtn.innerHTML = _svg("pause", 22);
-            playBtn.setAttribute("aria-label", "Pause");
-          }
-          const overlay = plateEl.querySelector(".audio-play-overlay");
-          if (overlay) overlay.style.display = "none";
-        });
-        ws.on("pause", () => {
-          const playBtn = plateEl.querySelector(".audio-btn-play");
-          if (playBtn) {
-            playBtn.innerHTML = _svg("play", 22);
-            playBtn.setAttribute("aria-label", "Play");
-          }
-        });
-        ws.on("finish", () => {
-          if (!wrapper.clipEnd) {
-            applyAudioClipEndDim(plateEl);
-            onEnded();
-          }
-        });
-        ws.on("error", (err) => {
-          console.error("audio-card: WaveSurfer error", err);
-          _injectAudioError(plateEl);
-          onError(err);
-        });
-        let elapsedEl = plateEl.querySelector(".audio-elapsed");
-        if (!elapsedEl) {
-          elapsedEl = document.createElement("div");
-          elapsedEl.className = "audio-elapsed";
-          elapsedEl.setAttribute("aria-live", "polite");
-          elapsedEl.textContent = "0:00";
-          elapsedEl.style.cssText = "position:absolute;font-size:0.8rem;color:rgba(0,0,0,0.7);background:rgba(255,255,255,0.6);backdrop-filter:blur(4px);border-radius:20px;padding:0.4rem 0.85rem;pointer-events:none;right:16px;bottom:calc(25% - 48px);z-index:1;";
-          plateEl.appendChild(elapsedEl);
-        }
-        if (!plateEl.querySelector(".audio-controls")) {
-          const controlsWrapper = document.createElement("div");
-          controlsWrapper.innerHTML = buildAudioControlsHTML();
-          const controlsEl = controlsWrapper.firstElementChild;
-          plateEl.appendChild(controlsEl);
-          const playBtn = controlsEl.querySelector(".audio-btn-play");
-          if (playBtn) {
-            playBtn.addEventListener("click", () => {
-              state.hasUserInteracted = true;
-              ws.playPause();
-            });
-          }
-          const restartBtn = controlsEl.querySelector(".audio-btn-restart");
-          if (restartBtn) {
-            restartBtn.addEventListener("click", () => {
-              ws.setTime(wrapper.clipStart || 0);
-              ws.play();
-              removeAudioClipEndDim(plateEl);
-            });
-          }
-          const muteBtn = controlsEl.querySelector(".audio-btn-mute");
-          if (muteBtn) {
-            muteBtn.addEventListener("click", () => {
-              const nowMuted = !ws.getMuted();
-              ws.setMuted(nowMuted);
-              if (nowMuted) {
-                muteBtn.innerHTML = _svg("volume-x", 20);
-                muteBtn.setAttribute("aria-label", "Unmute audio");
-              } else {
-                muteBtn.innerHTML = _svg("volume-2", 20);
-                muteBtn.setAttribute("aria-label", "Mute audio");
-              }
-            });
-          }
-        }
-        if (!plateEl.querySelector(".audio-play-overlay")) {
-          const overlayEl = document.createElement("div");
-          overlayEl.className = "audio-play-overlay";
-          overlayEl.style.cssText = "position:absolute;inset:0;display:none;align-items:center;justify-content:center;z-index:1;";
-          const _aObjectsData = window.objectsData || [];
-          const _aObj = _aObjectsData.find((o) => o.object_id === plateEl?.dataset?.object) || {};
-          const _aAlt = _aObj.alt_text || _aObj.title || "audio";
-          const overlayBtn = document.createElement("button");
-          overlayBtn.setAttribute("aria-label", `Play ${_aAlt}`);
-          overlayBtn.type = "button";
-          overlayBtn.innerHTML = _svg("play", 36);
-          overlayBtn.style.cssText = "width:80px;height:80px;border-radius:50%;background:rgba(255,255,255,0.9);border:none;cursor:pointer;box-shadow:0 2px 12px rgba(0,0,0,0.2);display:flex;align-items:center;justify-content:center;color:#333;";
-          overlayEl.appendChild(overlayBtn);
-          plateEl.appendChild(overlayEl);
-          overlayBtn.addEventListener("click", () => {
-            state.hasUserInteracted = true;
-            const ctx = getSharedAudioContext();
-            if (ctx.state === "suspended") {
-              ctx.resume().then(() => ws.play());
-            } else {
-              ws.play();
-            }
-            overlayEl.style.display = "none";
-          });
-        }
-        if (!plateEl.querySelector(".audio-clip-end-overlay")) {
-          const dimEl = document.createElement("div");
-          dimEl.className = "audio-clip-end-overlay";
-          dimEl.style.cssText = "position:absolute;inset:0;background:rgba(0,0,0,0.25);opacity:0;transition:opacity 300ms ease-in;pointer-events:none;";
-          plateEl.appendChild(dimEl);
-        }
-      });
-    }).catch((err) => {
-      console.error("audio-card: failed to load WaveSurfer API", err);
-      _injectAudioError(plateEl);
-      onError(err);
-    });
-    return wrapper;
-  }
-  function activateAudioCard(plateEl, sceneIndex) {
-    plateEl.style.transform = "translateY(0)";
-    plateEl.classList.add("is-active");
-    const wrapper = _getAudioWrapperForPlate(plateEl);
-    if (!wrapper || !wrapper.ws) return;
-    if (wrapper._fadeTimer) {
-      clearInterval(wrapper._fadeTimer);
-      wrapper._fadeTimer = null;
-      try {
-        wrapper.ws.setVolume(1);
-      } catch (e) {
-      }
-    }
-    try {
-      wrapper.ws.setOptions({ height: Math.round(window.innerHeight * _audioHeightFraction()) });
-    } catch (e) {
-    }
-    if (state.layoutMode === "vertical" || state.isEmbed) {
-      _showPlayOverlay(plateEl);
-      return;
-    }
-    try {
-      const ctx = getSharedAudioContext();
-      if (ctx.state === "suspended") {
-        ctx.resume().catch(() => {
-        });
-      }
-      wrapper.ws.play().catch((err) => {
-        if (err && err.name === "NotAllowedError") {
-          _showPlayOverlay(plateEl);
-          wrapper.isAutoplayBlocked = true;
-        }
-      });
-    } catch (err) {
-      if (err && err.name === "NotAllowedError") {
-        _showPlayOverlay(plateEl);
-      }
-    }
-  }
-  function deactivateAudioCard(plateEl, fadeMs = 300) {
-    plateEl.classList.remove("is-active");
-    const wrapper = _getAudioWrapperForPlate(plateEl);
-    if (!wrapper || !wrapper.ws) return;
-    const steps = Math.ceil(fadeMs / 50);
-    let step = 0;
-    const startVolume = wrapper.ws.getVolume ? wrapper.ws.getVolume() : 1;
-    if (wrapper._fadeTimer) clearInterval(wrapper._fadeTimer);
-    const timer = setInterval(() => {
-      step++;
-      const newVolume = startVolume * (1 - step / steps);
-      try {
-        wrapper.ws.setVolume(Math.max(0, newVolume));
-      } catch (e) {
-        clearInterval(timer);
-        wrapper._fadeTimer = null;
-        return;
-      }
-      if (step >= steps) {
-        clearInterval(timer);
-        wrapper._fadeTimer = null;
-        try {
-          wrapper.ws.pause();
-          wrapper.ws.setVolume(1);
-        } catch (e) {
-        }
-      }
-    }, 50);
-    wrapper._fadeTimer = timer;
-  }
-  function destroyAudioPlayer(wrapper) {
-    if (!wrapper) return;
-    wrapper._destroyed = true;
-    if (wrapper._fadeTimer) {
-      clearInterval(wrapper._fadeTimer);
-      wrapper._fadeTimer = null;
-    }
-    try {
-      if (wrapper.ws) {
-        wrapper.ws.destroy();
-      }
-    } catch (e) {
-      console.warn("destroyAudioPlayer: error during destroy", e);
-    }
-    const idx = _audioPlayers.indexOf(wrapper);
-    if (idx !== -1) _audioPlayers.splice(idx, 1);
-    const plateEl = wrapper.element;
-    if (plateEl) {
-      [
-        ".waveform-container",
-        ".audio-controls",
-        ".audio-elapsed",
-        ".audio-play-overlay",
-        ".audio-clip-end-overlay",
-        ".telar-alert"
-      ].forEach((sel) => {
-        const el = plateEl.querySelector(sel);
-        if (el) el.remove();
-      });
-    }
-  }
-  function updateAudioClip(plateEl, clipStart, clipEnd, loop) {
-    const wrapper = _getAudioWrapperForPlate(plateEl);
-    if (!wrapper) return;
-    if (wrapper.clipStart === clipStart && wrapper.clipEnd === clipEnd && wrapper.loop === loop) {
-      return;
-    }
-    wrapper.clipStart = clipStart;
-    wrapper.clipEnd = clipEnd;
-    wrapper.loop = loop;
-    plateEl.dataset.clipStart = String(clipStart);
-    plateEl.dataset.clipEnd = String(clipEnd);
-    plateEl.dataset.loop = String(loop);
-    removeAudioClipEndDim(plateEl);
-    if (wrapper._regionsPlugin) {
-      try {
-        wrapper._regionsPlugin.clearRegions();
-        if (clipStart !== void 0 && clipEnd && wrapper._colors) {
-          wrapper._regionsPlugin.addRegion({
-            start: clipStart,
-            end: clipEnd,
-            color: wrapper._colors.clipRegionColor,
-            drag: false,
-            resize: false
-          });
-        }
-      } catch (e) {
-      }
-    }
-    if (wrapper.ws) {
-      try {
-        wrapper.ws.setTime(clipStart || 0);
-      } catch (e) {
-      }
-    }
-  }
-  function applyAudioClipEndDim(plateEl) {
-    let overlay = plateEl.querySelector(".audio-clip-end-overlay");
-    if (!overlay) {
-      overlay = document.createElement("div");
-      overlay.className = "audio-clip-end-overlay";
-      overlay.style.cssText = "position:absolute;inset:0;background:rgba(0,0,0,0.25);opacity:0;transition:opacity 300ms ease-in;pointer-events:none;";
-      plateEl.appendChild(overlay);
-    }
-    void overlay.offsetHeight;
-    overlay.style.opacity = "1";
-  }
-  function removeAudioClipEndDim(plateEl) {
-    const overlay = plateEl.querySelector(".audio-clip-end-overlay");
-    if (overlay) overlay.style.opacity = "0";
-  }
-  function _enforceAudioPoolLimit(currentScene) {
-    while (_audioPlayers.length > MAX_AUDIO_PLAYERS) {
-      let farthestIdx = 0;
-      let maxDist = -1;
-      for (let i = 0; i < _audioPlayers.length; i++) {
-        const dist = Math.abs(_audioPlayers[i].sceneIndex - currentScene);
-        if (dist > maxDist) {
-          maxDist = dist;
-          farthestIdx = i;
-        }
-      }
-      const evicted = _audioPlayers.splice(farthestIdx, 1)[0];
-      _evictAudioPlayer(evicted);
-    }
-  }
-  function _evictAudioPlayer(wrapper) {
-    wrapper._destroyed = true;
-    if (wrapper._fadeTimer) {
-      clearInterval(wrapper._fadeTimer);
-      wrapper._fadeTimer = null;
-    }
-    try {
-      if (wrapper.ws) {
-        wrapper.ws.destroy();
-        wrapper.ws = null;
-      }
-    } catch (e) {
-      console.warn("_evictAudioPlayer: error during evict", e);
-    }
-  }
-  function _getAudioWrapperForPlate(plateEl) {
-    return _audioPlayers.find((w) => w.element === plateEl) || null;
-  }
-  function _showPlayOverlay(plateEl) {
-    const overlay = plateEl.querySelector(".audio-play-overlay");
-    if (overlay) overlay.style.display = "flex";
-  }
-  function _injectAudioError(plateEl) {
-    if (plateEl.querySelector(".telar-alert")) return;
-    const alertEl = document.createElement("div");
-    alertEl.className = "alert alert-warning telar-alert";
-    alertEl.setAttribute("role", "alert");
-    alertEl.innerHTML = `<strong>Audio unavailable</strong>
-<p>This audio file could not be loaded. Continue scrolling to read the story.</p>`;
-    plateEl.appendChild(alertEl);
-  }
-  onViewportResize(({ viewport }) => {
-    const newHeight = Math.round(viewport.h * _audioHeightFraction());
-    for (const wrapper of _audioPlayers) {
-      if (wrapper.element && wrapper.element.classList.contains("is-active") && wrapper.ws) {
-        try {
-          wrapper.ws.setOptions({ height: newHeight });
-        } catch (e) {
-        }
-      }
-    }
-  });
-
-  // assets/js/telar-story/model-card.js
-  var _modelPlayers = [];
-  var MAX_MODEL_VIEWERS = 3;
-  var DEFAULT_ORBIT = "0deg 75deg auto";
-  var MODEL_CAMERA_DURATION = 600;
-  function loadModelViewerAPI() {
-    if (window._mvApiPromise) return window._mvApiPromise;
-    window._mvApiPromise = new Promise((resolve, reject) => {
-      if (window.customElements && customElements.get("model-viewer")) {
-        resolve();
-        return;
-      }
-      const basePath = getBasePath();
-      const script = document.createElement("script");
-      script.src = `${basePath}/assets/vendor/model-viewer/model-viewer-umd.min.js`;
-      script.async = true;
-      script.onload = () => {
-        customElements.whenDefined("model-viewer").then(() => resolve());
-      };
-      script.onerror = () => reject(new Error("model-viewer failed to load"));
-      document.head.appendChild(script);
-    });
-    return window._mvApiPromise;
-  }
-  function createModelPlayer(plateEl, glbUrl, gltfUrl, options = {}) {
-    const {
-      cameraOrbit,
-      cameraTarget,
-      sceneIndex = 0,
-      alt = "",
-      onLoad = () => {
-      },
-      onError = () => {
-      }
-    } = options;
-    const wrapper = {
-      type: "model",
-      element: plateEl,
-      mv: null,
-      sceneIndex,
-      cameraOrbit: cameraOrbit || DEFAULT_ORBIT,
-      cameraTarget: cameraTarget || "",
-      _triedGltf: false,
-      _destroyed: false,
-      destroy() {
-        destroyModelPlayer(this);
-      }
-    };
-    _modelPlayers.push(wrapper);
-    _enforceModelPoolLimit(sceneIndex);
-    plateEl.dataset.loading = "true";
-    plateEl.dataset.modelInitPending = "true";
-    loadModelViewerAPI().then(() => {
-      if (wrapper._destroyed) {
-        delete plateEl.dataset.modelInitPending;
-        return;
-      }
-      const mv = document.createElement("model-viewer");
-      mv.className = "model-instance";
-      mv.setAttribute("camera-orbit", wrapper.cameraOrbit);
-      if (wrapper.cameraTarget) mv.setAttribute("camera-target", wrapper.cameraTarget);
-      mv.setAttribute("interaction-prompt", "none");
-      mv.setAttribute("interpolation-decay", "0");
-      mv.setAttribute("min-camera-orbit", "auto auto 0m");
-      mv.setAttribute("loading", "eager");
-      mv.setAttribute("shadow-intensity", "0.5");
-      mv.setAttribute("exposure", "1");
-      if (alt) mv.setAttribute("alt", alt);
-      mv.style.width = "100%";
-      mv.style.height = "100%";
-      mv.addEventListener("error", () => {
-        if (wrapper._destroyed) return;
-        if (!wrapper._triedGltf && gltfUrl) {
-          wrapper._triedGltf = true;
-          mv.setAttribute("src", gltfUrl);
-        } else {
-          delete plateEl.dataset.loading;
-          _injectModelError(plateEl);
-          onError(new Error("model-viewer load error"));
-        }
-      });
-      mv.addEventListener("load", () => {
-        if (wrapper._destroyed) return;
-        delete plateEl.dataset.loading;
-        frameModelInRegion(plateEl);
-        _settle(wrapper);
-        onLoad();
-      });
-      mv.setAttribute("src", glbUrl);
-      plateEl.appendChild(mv);
-      wrapper.mv = mv;
-      delete plateEl.dataset.modelInitPending;
-      frameModelInRegion(plateEl);
-    }).catch((err) => {
-      console.error("model-card: failed to load model-viewer API", err);
-      delete plateEl.dataset.loading;
-      delete plateEl.dataset.modelInitPending;
-      _injectModelError(plateEl);
-      onError(err);
-    });
-    return wrapper;
-  }
-  function activateModelCard(plateEl, sceneIndex) {
-    plateEl.style.transform = "translateY(0)";
-    plateEl.classList.add("is-active");
-  }
-  function deactivateModelCard(plateEl) {
-    plateEl.classList.remove("is-active");
-  }
-  function updateModelCamera(plateEl, cameraOrbit, cameraTarget, step) {
-    const wrapper = _getModelWrapperForPlate(plateEl);
-    if (!wrapper) return;
-    const nextOrbit = cameraOrbit || wrapper.cameraOrbit || DEFAULT_ORBIT;
-    const nextTarget = cameraTarget || "";
-    if (nextOrbit === wrapper.cameraOrbit && nextTarget === wrapper.cameraTarget) {
-      return;
-    }
-    wrapper.cameraOrbit = nextOrbit;
-    wrapper.cameraTarget = nextTarget;
-    plateEl.dataset.cameraOrbit = nextOrbit;
-    if (nextTarget) plateEl.dataset.cameraTarget = nextTarget;
-    else delete plateEl.dataset.cameraTarget;
-    const mv = wrapper.mv;
-    if (!mv) return;
-    if (!step || state.scrollDriven || _reduceMotion() || !mv.loaded) {
-      _cancelDiscreteCameraAnim(wrapper);
-      mv.cameraOrbit = nextOrbit;
-      mv.cameraTarget = nextTarget || "auto auto auto";
-      _jumpModelCameraToGoal(mv);
-      return;
-    }
-    _animateModelCameraDiscrete(wrapper, step, nextOrbit, nextTarget || "auto auto auto");
-  }
-  function _animateModelCameraDiscrete(wrapper, step, fallbackOrbit, fallbackTarget) {
-    const mv = wrapper.mv;
-    if (!mv) return;
-    _cancelDiscreteCameraAnim(wrapper);
-    const DEG = 180 / Math.PI;
-    const fO = mv.getCameraOrbit();
-    const fT = mv.getCameraTarget();
-    const fromTh = fO.theta * DEG, fromPh = fO.phi * DEG, fromR = fO.radius;
-    const fromT = [fT.x, fT.y, fT.z];
-    const az = _num(step.azimuth), el = _num(step.elevation), dist = _num(step.distance);
-    const toTh = az == null ? fromTh : az;
-    const toPh = el == null ? fromPh : el;
-    const toR = dist == null ? fromR : dist;
-    const stepT = _stepTarget(step);
-    const toT = stepT || fromT.slice();
-    let dth = toTh - fromTh;
-    dth = ((dth + 180) % 360 + 360) % 360 - 180;
-    const ease = (t) => 1 - Math.pow(1 - t, 3);
-    const start = typeof performance !== "undefined" ? performance.now() : Date.now();
-    const tick = (now) => {
-      const elapsed = now - start;
-      const p = elapsed >= MODEL_CAMERA_DURATION ? 1 : elapsed / MODEL_CAMERA_DURATION;
-      const e = ease(p);
-      const th = fromTh + dth * e;
-      const ph = fromPh + (toPh - fromPh) * e;
-      const r = fromR + (toR - fromR) * e;
-      const tx = fromT[0] + (toT[0] - fromT[0]) * e;
-      const ty = fromT[1] + (toT[1] - fromT[1]) * e;
-      const tz = fromT[2] + (toT[2] - fromT[2]) * e;
-      mv.cameraOrbit = `${th}deg ${ph}deg ${r}m`;
-      mv.cameraTarget = `${tx}m ${ty}m ${tz}m`;
-      _jumpModelCameraToGoal(mv);
-      if (p < 1) {
-        wrapper._cameraRAF = requestAnimationFrame(tick);
-      } else {
-        mv.cameraOrbit = fallbackOrbit;
-        mv.cameraTarget = fallbackTarget;
-        _jumpModelCameraToGoal(mv);
-        wrapper._cameraRAF = requestAnimationFrame(() => {
-          _jumpModelCameraToGoal(mv);
-          wrapper._cameraRAF = null;
-        });
-      }
-    };
-    wrapper._cameraRAF = requestAnimationFrame(tick);
-  }
-  function _cancelDiscreteCameraAnim(wrapper) {
-    if (wrapper && wrapper._cameraRAF) {
-      cancelAnimationFrame(wrapper._cameraRAF);
-      wrapper._cameraRAF = null;
-    }
-  }
-  function lerpModelCamera(stepIndex, progress, stepsData) {
-    if (progress < 1e-3) return;
-    const stepA = stepsData[stepIndex];
-    const stepB = stepsData[stepIndex + 1];
-    if (!stepA || !stepB) return;
-    const objectIdA = stepA.object || stepA.objectId || "";
-    const objectIdB = stepB.object || stepB.objectId || "";
-    if (objectIdA !== objectIdB) return;
-    const sceneIndex = state.stepToScene?.[stepIndex];
-    if (sceneIndex === void 0 || sceneIndex < 0) return;
-    const plate = state.viewerPlates?.[sceneIndex];
-    if (!plate || !plate.classList.contains("model-plate")) return;
-    const wrapper = _getModelWrapperForPlate(plate);
-    if (!wrapper) return;
-    _cancelDiscreteCameraAnim(wrapper);
-    const p = progress >= 0.999 ? 1 : progress;
-    const azP = _lerpPair(_num(stepA.azimuth), _num(stepB.azimuth), 0);
-    const elP = _lerpPair(_num(stepA.elevation), _num(stepB.elevation), 75);
-    const distP = _lerpPair(_num(stepA.distance), _num(stepB.distance), null);
-    let dTheta = azP.to - azP.from;
-    dTheta = ((dTheta + 180) % 360 + 360) % 360 - 180;
-    const theta = azP.from + dTheta * p;
-    const phi = elP.from + (elP.to - elP.from) * p;
-    const radiusPart = distP.from == null ? "auto" : `${distP.from + (distP.to - distP.from) * p}m`;
-    const orbitStr = `${theta}deg ${phi}deg ${radiusPart}`;
-    const mv = wrapper.mv;
-    wrapper.cameraOrbit = orbitStr;
-    if (mv) mv.cameraOrbit = orbitStr;
-    const tA = _stepTarget(stepA);
-    const tB = _stepTarget(stepB);
-    if (!tA && !tB) {
-      wrapper.cameraTarget = "";
-      if (mv) mv.cameraTarget = "auto auto auto";
-    } else {
-      let from = tA, to = tB;
-      if (!from || !to) {
-        if (mv && mv.loaded && typeof mv.getBoundingBoxCenter === "function") {
-          const c = mv.getBoundingBoxCenter();
-          const centre = [c.x, c.y, c.z];
-          from = from || centre;
-          to = to || centre;
-        } else {
-          _jumpModelCameraToGoal(mv);
-          return;
-        }
-      }
-      const tx = from[0] + (to[0] - from[0]) * p;
-      const ty = from[1] + (to[1] - from[1]) * p;
-      const tz = from[2] + (to[2] - from[2]) * p;
-      const targetStr = `${tx}m ${ty}m ${tz}m`;
-      wrapper.cameraTarget = targetStr;
-      if (mv) mv.cameraTarget = targetStr;
-    }
-    _jumpModelCameraToGoal(mv);
-  }
-  function _jumpModelCameraToGoal(mv) {
-    if (mv && typeof mv.jumpCameraToGoal === "function") mv.jumpCameraToGoal();
-  }
-  function frameModelInRegion(plateEl, animate = false) {
-    if (!plateEl) return;
-    const wrapper = _getModelWrapperForPlate(plateEl);
-    const mv = wrapper && wrapper.mv || plateEl.querySelector(".model-instance");
-    if (!mv) return;
-    const region = _computeModelRegion();
-    if (!region || region.w <= 0 || region.h <= 0) return;
-    const x = Math.round(region.x), y = Math.round(region.y);
-    const w = Math.round(region.w), h = Math.round(region.h);
-    if (mv.dataset.framed === "true" && Math.abs((parseFloat(mv.style.left) || 0) - x) < 1 && Math.abs((parseFloat(mv.style.top) || 0) - y) < 1 && Math.abs((parseFloat(mv.style.width) || 0) - w) < 1 && Math.abs((parseFloat(mv.style.height) || 0) - h) < 1) {
-      return;
-    }
-    const firstFrame = mv.dataset.framed !== "true";
-    const scrubbing = !!document.querySelector(".card-stack")?.classList.contains("is-scrubbing");
-    const ease = animate && !firstFrame && !scrubbing && !_reduceMotion();
-    mv.style.transition = ease ? ["left", "top", "width", "height"].map((p) => `${p} ${MODEL_CAMERA_DURATION}ms cubic-bezier(0,0,0.2,1)`).join(", ") : "none";
-    mv.dataset.framed = "true";
-    mv.style.position = "absolute";
-    mv.style.left = `${x}px`;
-    mv.style.top = `${y}px`;
-    mv.style.width = `${w}px`;
-    mv.style.height = `${h}px`;
-  }
-  function destroyModelPlayer(wrapper) {
-    if (!wrapper) return;
-    wrapper._destroyed = true;
-    _cancelDiscreteCameraAnim(wrapper);
-    const mv = wrapper.mv;
-    if (mv) {
-      try {
-        mv.remove();
-      } catch (e) {
-        console.warn("destroyModelPlayer: error removing element", e);
-      }
-      wrapper.mv = null;
-    }
-    const idx = _modelPlayers.indexOf(wrapper);
-    if (idx !== -1) _modelPlayers.splice(idx, 1);
-    const plateEl = wrapper.element;
-    if (plateEl) {
-      const alert = plateEl.querySelector(".telar-alert");
-      if (alert) alert.remove();
-      delete plateEl.dataset.loading;
-    }
-  }
-  function _settle(wrapper) {
-    _jumpModelCameraToGoal(wrapper && wrapper.mv);
-  }
-  function _reduceMotion() {
-    return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  }
-  function _enforceModelPoolLimit(currentScene) {
-    while (_modelPlayers.length > MAX_MODEL_VIEWERS) {
-      let farthestIdx = 0;
-      let maxDist = -1;
-      for (let i = 0; i < _modelPlayers.length; i++) {
-        const dist = Math.abs(_modelPlayers[i].sceneIndex - currentScene);
-        if (dist > maxDist) {
-          maxDist = dist;
-          farthestIdx = i;
-        }
-      }
-      const evicted = _modelPlayers[farthestIdx];
-      destroyModelPlayer(evicted);
-    }
-  }
-  function _getModelWrapperForPlate(plateEl) {
-    return _modelPlayers.find((w) => w.element === plateEl) || null;
-  }
-  function _num(v) {
-    if (v === void 0 || v === null) return null;
-    const s = String(v).trim();
-    if (s === "" || s.toLowerCase() === "nan") return null;
-    const n = parseFloat(s);
-    return Number.isNaN(n) ? null : n;
-  }
-  function _lerpPair(a, b, dflt) {
-    if (a == null && b == null) return { from: dflt, to: dflt };
-    return { from: a == null ? b : a, to: b == null ? a : b };
-  }
-  function _stepTarget(step) {
-    const x = _num(step.target_x), y = _num(step.target_y), z = _num(step.target_z);
-    if (x == null && y == null && z == null) return null;
-    return [x || 0, y || 0, z || 0];
-  }
-  function _stepToOrbitString(step) {
-    const az = _num(step.azimuth);
-    const el = _num(step.elevation);
-    const dist = _num(step.distance);
-    const a = (az == null ? 0 : az) + "deg";
-    const e = (el == null ? 75 : el) + "deg";
-    const r = dist == null ? "auto" : dist + "m";
-    return `${a} ${e} ${r}`;
-  }
-  function _stepToTargetString(step) {
-    const t = _stepTarget(step);
-    return t ? `${t[0]}m ${t[1]}m ${t[2]}m` : "";
-  }
-  function stepCameraStrings(step) {
-    return { orbit: _stepToOrbitString(step), target: _stepToTargetString(step) };
-  }
-  function _computeModelRegion() {
-    const vpW = window.innerWidth;
-    const vpH = window.innerHeight;
-    const r = state.cardOverlayRect;
-    const cardBox = r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null;
-    const placement = _deriveCardPlacement(cardBox, vpW, vpH);
-    return computeUncoveredRegion(cardBox, placement, vpW, vpH);
-  }
-  function _reframeActiveModelPlate() {
-    const plates = Object.values(state.viewerPlates || {});
-    const plate = plates.find(
-      (p) => p && p.classList && p.classList.contains("model-plate") && p.classList.contains("is-active")
-    );
-    if (plate) frameModelInRegion(plate);
-  }
-  onViewportResize(() => _reframeActiveModelPlate());
-  onLayoutChange(() => requestAnimationFrame(() => _reframeActiveModelPlate()));
-  function _injectModelError(plateEl) {
-    if (plateEl.querySelector(".telar-alert")) return;
-    const alertEl = document.createElement("div");
-    alertEl.className = "alert alert-warning telar-alert";
-    alertEl.setAttribute("role", "alert");
-    alertEl.innerHTML = `<strong>3D model unavailable</strong>
-<p>This 3D model could not be loaded. Continue scrolling to read the story.</p>`;
-    plateEl.appendChild(alertEl);
-  }
-
-  // assets/js/telar-story/card-pool.js
-  function _modelPlateNeedsInit(plate) {
-    return !plate.dataset.modelInitPending && !plate.querySelector(".model-instance");
-  }
-  function _isTruthy(val) {
-    if (val === true) return true;
-    if (typeof val === "string") {
-      const v = val.trim().toLowerCase();
-      return v === "true" || v === "yes" || v === "s\xED";
-    }
-    return false;
-  }
-  function computeZIndexPlan(steps) {
-    let scene = -1;
-    let runPos = 0;
-    let currentObjectId = null;
-    let titleCounter = 0;
-    const plateZ = {};
-    const textCardZ = {};
-    for (let i = 0; i < steps.length; i++) {
-      const objectId = steps[i].object || steps[i].objectId || "";
-      const effectiveId = objectId === "" ? "__title_" + titleCounter++ + "__" : objectId;
-      if (effectiveId !== currentObjectId) {
-        scene++;
-        runPos = 0;
-        currentObjectId = effectiveId;
-      }
-      if (scene === 97) {
-        console.warn("[Telar] Story has more than 98 unique scenes; z-index banding is clamped at 9800 and panel/UI chrome layering may overlap.");
-      }
-      const bandBase = Math.min((scene + 1) * 100, 9800);
-      plateZ[i] = bandBase;
-      textCardZ[i] = bandBase + 1 + runPos;
-      runPos++;
-    }
-    return { plateZ, textCardZ };
-  }
-  function seededRandom(seed) {
-    const n = Math.sin(seed * 127.1 + 311.7) * 43758.5453;
-    return n - Math.floor(n);
-  }
-  function getCardMessiness(seed, messinessPercent) {
-    if (messinessPercent === 0) return { rot: 0, offX: 0, offY: 0 };
-    const factor = messinessPercent / 100;
-    const maxRot = 1.2 * factor;
-    const maxOffX = 8 * factor;
-    const maxOffY = 4 * factor;
-    const rot = seededRandom(seed * 3 + 1) * maxRot * 2 - maxRot;
-    const offX = seededRandom(seed * 3 + 2) * maxOffX * 2 - maxOffX;
-    const offY = seededRandom(seed * 3 + 3) * maxOffY * 2 - maxOffY;
-    return { rot, offX, offY };
-  }
-  function computeCardTop(viewportH, cardH, runPosition, peekHeightPx) {
-    const centred = (viewportH - cardH) / 2;
-    return centred + runPosition * peekHeightPx;
-  }
-  function _buildAriaLabel(objectId, stepAlt, cardType) {
-    if (stepAlt) return stepAlt;
-    const obj = state.objectsIndex?.[objectId] || {};
-    if (obj.alt_text) return obj.alt_text;
-    if (obj.title) return obj.title;
-    if (objectId) return objectId;
-    if (cardType === "youtube" || cardType === "vimeo" || cardType === "google-drive") return "Video player";
-    if (cardType === "audio") return "Audio player";
-    if (cardType === "model") return "3D model viewer";
-    return "Image viewer";
-  }
-  var _stepsData = [];
-  var _config = { peekHeight: 1, messiness: 20, preloadSteps: 5 };
-  var _zPlan = { viewerPlateZ: {}, textCardZ: {} };
-  var _prefetchedScenes = /* @__PURE__ */ new Set();
-  function _buildSceneMaps(steps) {
-    let scene = -1;
-    let currentObjectId = null;
-    let titleCounter = 0;
-    state.stepToScene = {};
-    state.sceneToObject = {};
-    state.sceneFirstStep = {};
-    for (let i = 0; i < steps.length; i++) {
-      const objectId = steps[i].object || steps[i].objectId || "";
-      const effectiveId = objectId === "" ? "__title_" + titleCounter++ + "__" : objectId;
-      if (effectiveId !== currentObjectId) {
-        scene++;
-        currentObjectId = effectiveId;
-        state.sceneToObject[scene] = objectId;
-        state.sceneFirstStep[scene] = i;
-      }
-      state.stepToScene[i] = scene;
-    }
-    state.totalScenes = scene + 1;
-  }
-  function getSceneIndex(stepIndex) {
-    return state.stepToScene[stepIndex] ?? -1;
-  }
-  function buildTransform(messiness, baseTranslate) {
-    return `${baseTranslate} rotate(${messiness.rot}deg) translate(${messiness.offX}px, ${messiness.offY}px)`;
-  }
-  function _recomputeCardGeometry(viewportW, viewportH) {
-    const peekHeight = _config.peekHeight ?? 1;
-    const landscapeSideCard = isLandscapeSideCard();
-    const cards = document.querySelectorAll(".text-card");
-    for (const card of cards) {
-      const runPos = parseInt(card.dataset.runPosition, 10) || 0;
-      if (landscapeSideCard) {
-        card.style.height = "";
-        const cardH = card.offsetHeight;
-        const topPx = computeCardTop(viewportH, cardH, runPos, peekHeight);
-        card.style.setProperty("top", `${topPx}px`, "important");
-      } else if (getLayoutMode() === "vertical") {
-        card.style.removeProperty("top");
-        card.style.height = `${viewportH * 0.8}px`;
-      } else {
-        const cardH = viewportH * 0.8;
-        const topPx = computeCardTop(viewportH, cardH, runPos, peekHeight);
-        card.style.setProperty("top", `${topPx}px`, "important");
-        card.style.height = `${cardH}px`;
-      }
-    }
-  }
-  function initCardPool(storyData, config) {
-    const cardStack = document.querySelector(".card-stack");
-    if (!cardStack) return;
-    const steps = (storyData?.steps || []).filter((s) => !s._metadata);
-    const peekHeight = config?.peekHeight ?? 1;
-    const messinessPercent = config?.messiness ?? 20;
-    _stepsData = steps;
-    state.stepsData = steps;
-    _config = {
-      peekHeight,
-      messiness: messinessPercent,
-      preloadSteps: state.config.preloadSteps || 5
-    };
-    const viewportH = window.innerHeight;
-    const cardH = viewportH * 0.8;
-    _zPlan = computeZIndexPlan(steps);
-    _buildSceneMaps(steps);
-    state.titleCards = {};
-    state.activeTitleCardIndex = null;
-    const audioObjects = storyData?.audioObjects || window.audioObjects || {};
-    const modelObjects = storyData?.modelObjects || window.modelObjects || {};
-    const _filePathFor = (objectId) => {
-      const aExt = audioObjects[objectId];
-      if (aExt) return `objects/${objectId}.${aExt}`;
-      const mExt = modelObjects[objectId];
-      if (mExt) return `objects/${objectId}.${mExt}`;
-      return "";
-    };
-    for (let sceneIdx = 0; sceneIdx < state.totalScenes; sceneIdx++) {
-      const firstStepIdx = state.sceneFirstStep[sceneIdx];
-      const objectId = state.sceneToObject[sceneIdx];
-      if (!objectId) continue;
-      const firstStep = steps[firstStepIdx] || {};
-      const objectData = state.objectsIndex[objectId] || {};
-      const sceneCardType = detectCardType({
-        objectId,
-        cardType: firstStep.cardType,
-        source_url: objectData.source_url || objectData.iiif_manifest || "",
-        file_path: _filePathFor(objectId)
-      });
-      const plate = document.createElement("div");
-      plate.className = "viewer-plate";
-      plate.dataset.object = objectId;
-      plate.dataset.scene = String(sceneIdx);
-      plate.dataset.cardType = sceneCardType;
-      plate.style.zIndex = _zPlan.plateZ[firstStepIdx];
-      plate.setAttribute("role", "img");
-      plate.setAttribute("aria-label", _buildAriaLabel(objectId, firstStep.alt_text, sceneCardType));
-      plate.style.transform = "translateY(100%)";
-      if (sceneCardType === "youtube" || sceneCardType === "vimeo" || sceneCardType === "google-drive") {
-        plate.classList.add("video-plate");
-        plate.dataset.cardType = sceneCardType;
-        if (firstStep.clip_start) plate.dataset.clipStart = firstStep.clip_start;
-        if (firstStep.clip_end) plate.dataset.clipEnd = firstStep.clip_end;
-        if (firstStep.loop) plate.dataset.loop = firstStep.loop;
-      }
-      if (sceneCardType === "audio") {
-        plate.classList.add("audio-plate");
-        plate.dataset.cardType = "audio";
-        if (firstStep.clip_start) plate.dataset.clipStart = firstStep.clip_start;
-        if (firstStep.clip_end) plate.dataset.clipEnd = firstStep.clip_end;
-        if (firstStep.loop) plate.dataset.loop = firstStep.loop;
-      }
-      if (sceneCardType === "model") {
-        plate.classList.add("model-plate");
-        plate.dataset.cardType = "model";
-        const firstCam = stepCameraStrings(firstStep);
-        if (firstCam.orbit) plate.dataset.cameraOrbit = firstCam.orbit;
-        if (firstCam.target) plate.dataset.cameraTarget = firstCam.target;
-      }
-      cardStack.appendChild(plate);
-      state.viewerPlates[sceneIdx] = plate;
-    }
-    const objectRunPosition = {};
-    for (let stepIdx = 0; stepIdx < steps.length; stepIdx++) {
-      const step = steps[stepIdx];
-      const objectId = step.object || step.objectId || "";
-      const objectData = state.objectsIndex[objectId] || {};
-      const cardType = detectCardType({
-        objectId,
-        cardType: step.cardType,
-        source_url: objectData.source_url || objectData.iiif_manifest || "",
-        file_path: _filePathFor(objectId)
-      });
-      if (!objectId) {
-        const zIndex = _zPlan.textCardZ[stepIdx];
-        const titleCard = document.createElement("div");
-        titleCard.className = "title-card";
-        titleCard.dataset.stepIndex = String(stepIdx);
-        titleCard.dataset.cardType = "title";
-        titleCard.style.zIndex = zIndex;
-        titleCard.style.transform = "translateY(100vh)";
-        titleCard.innerHTML = _buildTitleCardContent(step);
-        cardStack.appendChild(titleCard);
-        state.titleCards[stepIdx] = titleCard;
-        continue;
-      }
-      if (cardType === "text-only" || objectId) {
-        if (!Object.hasOwn(objectRunPosition, objectId)) {
-          objectRunPosition[objectId] = 0;
-        }
-        const runPos = objectRunPosition[objectId];
-        objectRunPosition[objectId]++;
-        const objectIndex = getSceneIndex(stepIdx);
-        const zIndex = _zPlan.textCardZ[stepIdx];
-        const topPx = computeCardTop(viewportH, cardH, 0, peekHeight);
-        const messiness = getCardMessiness(stepIdx, messinessPercent);
-        const card = document.createElement("div");
-        card.className = "text-card";
-        card.dataset.stepIndex = stepIdx;
-        card.dataset.object = objectId;
-        card.dataset.runPosition = runPos;
-        card.style.zIndex = zIndex;
-        card.style.top = `${topPx}px`;
-        card.style.height = `${cardH}px`;
-        card.style.transform = buildTransform(messiness, "translateY(100vh)");
-        card.dataset.messinessRot = messiness.rot;
-        card.dataset.messinessOffX = messiness.offX;
-        card.dataset.messinessOffY = messiness.offY;
-        const hiddenStep = document.querySelector(`.step-data .story-step[data-step="${step.step}"]`);
-        if (hiddenStep) {
-          const content = hiddenStep.querySelector(".step-content");
-          if (content) {
-            card.appendChild(content.cloneNode(true));
-          } else {
-            card.innerHTML = buildTextCardContent(step);
-          }
-        } else {
-          card.innerHTML = buildTextCardContent(step);
-        }
-        cardStack.appendChild(card);
-        state.textCards[stepIdx] = card;
-        state.cardPool.push({
-          stepIndex: stepIdx,
-          objectId,
-          cardType,
-          runPosition: runPos,
-          objectIndex,
-          element: card
-        });
-      }
-    }
-    if (steps.length > 0) {
-      const firstStep = steps[0];
-      const firstObjectId = firstStep.object || firstStep.objectId || "";
-      if (firstObjectId && state.viewerPlates[0]) {
-        const plate = state.viewerPlates[0];
-        const zIndex = _zPlan.plateZ[0];
-        if (plate.classList.contains("video-plate")) {
-          _initVideoInPlate(plate, firstObjectId, 0, zIndex);
-        } else if (plate.classList.contains("audio-plate")) {
-          _initAudioInPlate(plate, firstObjectId, 0, zIndex);
-        } else if (plate.classList.contains("model-plate")) {
-          _initModelInPlate(plate, firstObjectId, 0, zIndex);
-        } else {
-          const x = parseFloat(firstStep.x);
-          const y = parseFloat(firstStep.y);
-          const zoom = parseFloat(firstStep.zoom);
-          const page = firstStep.page ? parseInt(firstStep.page, 10) : void 0;
-          _initOsdInPlate(plate, firstObjectId, 0, zIndex, x, y, zoom, page);
-        }
-      }
-    }
-    onViewportResize(({ viewport }) => {
-      _recomputeCardGeometry(viewport.w, viewport.h);
-    });
-    onLayoutChange(({ viewport }) => {
-      _recomputeCardGeometry(viewport.w, viewport.h);
-    });
-    _recomputeCardGeometry(window.innerWidth, window.innerHeight);
-  }
-  function buildTextCardContent(step) {
-    const question = escapeHtml(step.question || "");
-    const answer = escapeHtml(step.answer || "");
-    const hasLayer1 = step.layer1_button && step.layer1_button.trim();
-    const hasLayer2 = step.layer2_button && step.layer2_button.trim();
-    let layerButtons = "";
-    if (hasLayer1) {
-      layerButtons += `<button class="panel-trigger" data-panel="layer1" data-step="${step.step}">${escapeHtml(step.layer1_button)}</button>`;
-    }
-    if (hasLayer2) {
-      layerButtons += `<button class="panel-trigger" data-panel="layer2" data-step="${step.step}">${escapeHtml(step.layer2_button)}</button>`;
-    }
-    return `
-    <div class="step-question">${question}</div>
-    <div class="step-answer">${answer}</div>
-    ${layerButtons ? `<div class="step-actions">${layerButtons}</div>` : ""}
-  `;
-  }
-  function _buildTitleCardContent(step) {
-    const heading = step.question || "";
-    const body = step.answer || "";
-    return `
-    <div class="title-card-inner">
-      <h2 class="title-card-heading">${heading}</h2>
-      ${body ? '<p class="title-card-body">' + body + "</p>" : ""}
-    </div>
-  `;
-  }
-  function activateCard(index2, direction) {
-    if (state.titleCards?.[index2]) {
-      _activateTitleCardStep(index2, direction);
-      return;
-    }
-    const card = state.textCards[index2];
-    if (!card) return;
-    const poolEntry = state.cardPool.find((c) => c.stepIndex === index2);
-    if (!poolEntry) return;
-    const step = _stepsData[index2] || {};
-    const prevStep2 = index2 > 0 ? _stepsData[index2 - 1] : null;
-    const objectId = poolEntry.objectId;
-    const prevObjectId = state.currentObjectRun?.objectId;
-    const currentMode = isFullObjectMode(step);
-    const prevMode = prevStep2 ? isFullObjectMode(prevStep2) : null;
-    const isModeChange = prevMode !== null && currentMode !== prevMode;
-    const isObjectChange = objectId !== prevObjectId;
-    const needsNewViewer = isObjectChange || isModeChange;
-    if (direction === "forward") {
-      if (needsNewViewer) {
-        _activateNewViewerPlate(objectId, index2, prevObjectId, step, direction);
-        state.currentObjectRun = { objectId, runPosition: poolEntry.runPosition };
-        _deactivatePreviousTextCard(index2, direction);
-        if (state.activeTitleCardIndex != null) {
-          const prevTitle = state.titleCards[state.activeTitleCardIndex];
-          if (prevTitle) {
-            prevTitle.classList.remove("is-active");
-            prevTitle.classList.add("is-stacked");
-          }
-          state.activeTitleCardIndex = null;
-        }
-        _activateTextCard(card);
-        updateObjectCredits(objectId);
-      } else {
-        state.currentObjectRun.runPosition = poolEntry.runPosition;
-        _deactivatePreviousTextCard(index2, direction);
-        _activateTextCard(card);
-        const sceneIndex = getSceneIndex(index2);
-        const plate = sceneIndex >= 0 ? state.viewerPlates[sceneIndex] : null;
-        if (plate && !plate.classList.contains("is-active")) {
-          plate.style.transform = "translateY(0)";
-          plate.classList.add("is-active");
-        }
-        if (plate && plate.classList.contains("video-plate")) {
-          const clipStart = parseFloat(step.clip_start) || 0;
-          const clipEnd = parseFloat(step.clip_end) || 0;
-          const loop = _isTruthy(step.loop);
-          updateVideoClip(plate, clipStart, clipEnd || void 0, loop);
-        } else if (plate && plate.classList.contains("audio-plate")) {
-          const clipStart = parseFloat(step.clip_start) || 0;
-          const clipEnd = parseFloat(step.clip_end) || 0;
-          const loop = _isTruthy(step.loop);
-          updateAudioClip(plate, clipStart, clipEnd || void 0, loop);
-        } else if (plate && plate.classList.contains("model-plate")) {
-          const cam = stepCameraStrings(step);
-          updateModelCamera(plate, cam.orbit, cam.target, step);
-        } else if (!state.scrollDriven) {
-          _animateViewerToStep(objectId, step, index2);
-        }
-      }
-    } else {
-      if (needsNewViewer) {
-        const currentSceneIndex = getSceneIndex(index2 + 1);
-        const currentPlate = currentSceneIndex >= 0 ? state.viewerPlates[currentSceneIndex] : null;
-        const prevPlate = state.viewerPlates[getSceneIndex(index2)];
-        {
-          if (currentPlate) {
-            if (currentPlate.classList.contains("video-plate")) {
-              currentPlate.style.transition = "none";
-              currentPlate.style.transform = "translateY(100%)";
-              void currentPlate.offsetHeight;
-              currentPlate.style.transition = "";
-              deactivateVideoCard(currentPlate);
-            } else if (currentPlate.classList.contains("audio-plate")) {
-              currentPlate.style.transition = "none";
-              currentPlate.style.transform = "translateY(100%)";
-              void currentPlate.offsetHeight;
-              currentPlate.style.transition = "";
-              deactivateAudioCard(currentPlate);
-            } else if (currentPlate.classList.contains("model-plate")) {
-              currentPlate.style.transform = "translateY(100%)";
-              deactivateModelCard(currentPlate);
-            } else {
-              deactivateIiifCard(
-                { element: currentPlate, objectId: prevObjectId },
-                "backward"
-              );
-            }
-            currentPlate.classList.remove("is-active");
-          }
-          if (prevPlate) {
-            prevPlate.style.zIndex = _zPlan.plateZ[index2];
-            prevPlate.style.transition = "none";
-            prevPlate.style.transform = "translateY(0)";
-            void prevPlate.offsetHeight;
-            prevPlate.style.transition = "";
-            prevPlate.classList.add("is-active");
-            if (prevPlate.classList.contains("video-plate")) {
-              activateVideoCard(prevPlate, getSceneIndex(index2));
-            } else if (prevPlate.classList.contains("audio-plate")) {
-              activateAudioCard(prevPlate, getSceneIndex(index2));
-            } else if (prevPlate.classList.contains("model-plate")) {
-              const cam = stepCameraStrings(step);
-              if (_modelPlateNeedsInit(prevPlate)) {
-                _initModelInPlate(prevPlate, objectId, getSceneIndex(index2), _zPlan.plateZ[index2], cam.orbit, cam.target);
-              }
-              activateModelCard(prevPlate, getSceneIndex(index2));
-              updateModelCamera(prevPlate, cam.orbit, cam.target);
-            }
-          }
-        }
-        state.currentObjectRun = { objectId, runPosition: poolEntry.runPosition };
-        _deactivatePreviousTextCard(index2, direction);
-        if (state.activeTitleCardIndex != null) {
-          const prevTitle = state.titleCards[state.activeTitleCardIndex];
-          if (prevTitle) {
-            prevTitle.classList.remove("is-active");
-            prevTitle.style.transform = "translateY(100vh)";
-            prevTitle.classList.remove("is-stacked");
-          }
-          state.activeTitleCardIndex = null;
-        }
-        _activateTextCard(card);
-        updateObjectCredits(objectId);
-      } else {
-        state.currentObjectRun.runPosition = poolEntry.runPosition;
-        _deactivatePreviousTextCard(index2, direction);
-        _activateTextCard(card);
-        const sceneIndex = getSceneIndex(index2);
-        const plate = sceneIndex >= 0 ? state.viewerPlates[sceneIndex] : null;
-        if (plate && plate.classList.contains("video-plate")) {
-          const clipStart = parseFloat(step.clip_start) || 0;
-          const clipEnd = parseFloat(step.clip_end) || 0;
-          const loop = _isTruthy(step.loop);
-          updateVideoClip(plate, clipStart, clipEnd || void 0, loop);
-        } else if (plate && plate.classList.contains("audio-plate")) {
-          const clipStart = parseFloat(step.clip_start) || 0;
-          const clipEnd = parseFloat(step.clip_end) || 0;
-          const loop = _isTruthy(step.loop);
-          updateAudioClip(plate, clipStart, clipEnd || void 0, loop);
-        } else if (plate && plate.classList.contains("model-plate")) {
-          const cam = stepCameraStrings(step);
-          updateModelCamera(plate, cam.orbit, cam.target, step);
-        } else if (!state.scrollDriven) {
-          _animateViewerToStep(objectId, step, index2);
-        }
-      }
-    }
-    const _stepData = _stepsData[index2] || {};
-    const _stepAlt = _stepData.alt_text || "";
-    const _plateForStep = state.viewerPlates?.[state.stepToScene?.[index2]];
-    if (_plateForStep) {
-      const _cType = _plateForStep.dataset.cardType || "iiif";
-      _plateForStep.setAttribute("aria-label", _buildAriaLabel(objectId, _stepAlt, _cType));
-    }
-    preloadAhead(index2, _config.preloadSteps, 2);
-  }
-  function setCardProgress(stepIndex, progress) {
-    if (progress < 1e-3) return;
-    const nextIndex = stepIndex + 1;
-    const nextCard = state.textCards[nextIndex] || state.titleCards?.[nextIndex];
-    if (!nextCard) return;
-    const cardStack = document.querySelector(".card-stack");
-    if (!cardStack || !cardStack.classList.contains("is-scrubbing")) return;
-    const rot = parseFloat(nextCard.dataset.messinessRot || 0);
-    const offX = parseFloat(nextCard.dataset.messinessOffX || 0);
-    const offY = parseFloat(nextCard.dataset.messinessOffY || 0);
-    const translateY = (1 - progress) * 100;
-    nextCard.style.transform = `translateY(${translateY}vh) rotate(${rot}deg) translate(${offX}px, ${offY}px)`;
-    const nextStep2 = _stepsData[nextIndex];
-    const currentStep = _stepsData[stepIndex];
-    if (!nextStep2 || !currentStep) return;
-    const nextObjectId = nextStep2.object || nextStep2.objectId || "";
-    const currentObjectId = currentStep.object || currentStep.objectId || "";
-    if (nextObjectId !== currentObjectId) {
-      if (nextObjectId === "") {
-        const currentSceneIndex = getSceneIndex(stepIndex);
-        const currentPlate = currentSceneIndex >= 0 ? state.viewerPlates[currentSceneIndex] : null;
-        if (currentPlate) {
-          currentPlate.style.transform = `translateY(-${progress * 100}%)`;
-        }
-      } else {
-        const nextSceneIndex = getSceneIndex(nextIndex);
-        const nextPlate = nextSceneIndex >= 0 ? state.viewerPlates[nextSceneIndex] : null;
-        if (nextPlate) {
-          const plateTranslateY = (1 - progress) * 100;
-          nextPlate.style.transform = `translateY(${plateTranslateY}%)`;
-        }
-      }
-    }
-  }
-  function _activateNewViewerPlate(objectId, stepIndex, prevObjectId, step, direction) {
-    const sceneIndex = getSceneIndex(stepIndex);
-    const prevSceneIndex = stepIndex > 0 ? getSceneIndex(stepIndex - 1) : -1;
-    const prevPlate = prevSceneIndex >= 0 ? state.viewerPlates[prevSceneIndex] : null;
-    const newPlate = sceneIndex >= 0 ? state.viewerPlates[sceneIndex] : null;
-    if (!newPlate) return;
-    newPlate.style.zIndex = _zPlan.plateZ[stepIndex];
-    if (prevPlate && prevPlate === newPlate) {
-      newPlate.style.transform = "translateY(0)";
-      newPlate.classList.add("is-active");
-      if (newPlate.classList.contains("model-plate")) {
-        activateModelCard(newPlate, sceneIndex);
-        const cam = stepCameraStrings(step);
-        updateModelCamera(newPlate, cam.orbit, cam.target);
-      }
-      return;
-    }
-    if (direction === "forward") {
-      if (sceneIndex === 0) {
-        const currentTransform = newPlate.style.transform;
-        if (!currentTransform || currentTransform === "translateY(100%)") {
-          newPlate.style.transform = "translateY(100%)";
-          void newPlate.offsetHeight;
-        }
-      } else {
-        newPlate.style.transform = "translateY(100%)";
-        void newPlate.offsetHeight;
-      }
-      newPlate.style.transform = "translateY(0)";
-    } else {
-      newPlate.style.transform = "translateY(0)";
-      if (prevPlate) {
-        prevPlate.style.transform = "translateY(100%)";
-      }
-    }
-    newPlate.classList.add("is-active");
-    if (prevPlate) {
-      if (prevPlate.classList.contains("video-plate")) {
-        deactivateVideoCard(prevPlate);
-      } else if (prevPlate.classList.contains("audio-plate")) {
-        deactivateAudioCard(prevPlate);
-      } else if (prevPlate.classList.contains("model-plate")) {
-        deactivateModelCard(prevPlate);
-      } else {
-        prevPlate.classList.remove("is-active");
-      }
-    }
-    const viewerCard = state.viewerCards.find((vc) => vc.sceneIndex === sceneIndex);
-    const x = parseFloat(step.x);
-    const y = parseFloat(step.y);
-    const zoom = parseFloat(step.zoom);
-    const page = step.page ? parseInt(step.page, 10) : void 0;
-    if (newPlate.classList.contains("model-plate")) {
-      const cam = stepCameraStrings(step);
-      if (_modelPlateNeedsInit(newPlate)) {
-        const zIndex = _zPlan.plateZ[stepIndex];
-        _initModelInPlate(newPlate, objectId, sceneIndex, zIndex, cam.orbit, cam.target);
-      }
-      activateModelCard(newPlate, sceneIndex);
-      updateModelCamera(newPlate, cam.orbit, cam.target);
-    } else if (newPlate.classList.contains("audio-plate")) {
-      if (!newPlate.querySelector(".waveform-container")) {
-        const zIndex = _zPlan.plateZ[stepIndex];
-        _initAudioInPlate(newPlate, objectId, sceneIndex, zIndex);
-      }
-      activateAudioCard(newPlate, sceneIndex);
-    } else if (newPlate.classList.contains("video-plate")) {
-      if (!newPlate.querySelector(".video-iframe, iframe")) {
-        const zIndex = _zPlan.plateZ[stepIndex];
-        _initVideoInPlate(newPlate, objectId, sceneIndex, zIndex);
-      }
-      activateVideoCard(newPlate, sceneIndex);
-    } else if (!viewerCard) {
-      const zIndex = _zPlan.plateZ[stepIndex];
-      _initOsdInPlate(newPlate, objectId, sceneIndex, zIndex, x, y, zoom, page);
-    } else if (viewerCard.isReady && !isNaN(x) && !isNaN(y) && !isNaN(zoom)) {
-      snapIiifToPosition(viewerCard, x, y, zoom);
-    } else if (!isNaN(x) && !isNaN(y) && !isNaN(zoom)) {
-      viewerCard.pendingZoom = { x, y, zoom, snap: true };
-    }
-  }
-  function _initOsdInPlate(plateEl, objectId, sceneIndex, zIndex, x, y, zoom, page) {
-    const manifestUrl = getManifestUrl(objectId, page);
-    if (!manifestUrl) {
-      console.error("_initOsdInPlate: no manifest URL for", objectId);
-      return;
-    }
-    plateEl.dataset.loading = "true";
-    const viewerId = `iiif-viewer-${state.viewerCardCounter}`;
-    let viewerDiv = plateEl.querySelector(".viewer-instance");
-    if (!viewerDiv) {
-      viewerDiv = document.createElement("div");
-      viewerDiv.className = "viewer-instance";
-      viewerDiv.id = viewerId;
-      plateEl.appendChild(viewerDiv);
-    } else {
-      viewerDiv.id = viewerId;
-    }
-    const startPage = page && page > 1 ? page - 1 : 0;
-    const osdWrapper = new IiifViewer({
-      container: "#" + viewerId,
-      manifestUrl,
-      startPage,
-      showChrome: false
-    });
-    const viewerCard = {
-      sceneIndex,
-      // scene this card belongs to
-      objectId,
-      page: page || void 0,
-      element: plateEl,
-      osdWrapper,
-      osdViewer: null,
-      isReady: false,
-      pendingZoom: !isNaN(x) && !isNaN(y) && !isNaN(zoom) ? { x, y, zoom, snap: true } : null,
-      zIndex
-    };
-    osdWrapper.ready.then(() => {
-      viewerCard.osdViewer = osdWrapper.viewer;
-      viewerCard.isReady = true;
-      delete plateEl.dataset.loading;
-      osdWrapper.viewer.gestureSettingsMouse.scrollToZoom = false;
-      if (viewerCard.pendingZoom) {
-        const pz = viewerCard.pendingZoom;
-        if (pz.snap) {
-          snapIiifToPosition(viewerCard, pz.x, pz.y, pz.zoom);
-        } else {
-          animateIiifToPosition(viewerCard, pz.x, pz.y, pz.zoom);
-        }
-        requestAnimationFrame(() => {
-          const pzAfter = viewerCard.pendingZoom;
-          if (pzAfter && viewerCard.osdViewer) {
-            const vp = viewerCard.osdViewer.viewport;
-            const homeZoom = vp.getHomeZoom();
-            const curZoom = vp.getZoom(true);
-            const TOL = 0.05;
-            const authoredIsZoomed = pzAfter.zoom > 1.1;
-            const droppedToHome = Math.abs(curZoom - homeZoom) < homeZoom * TOL;
-            if (authoredIsZoomed && droppedToHome) {
-              if (pzAfter.snap) {
-                snapIiifToPosition(viewerCard, pzAfter.x, pzAfter.y, pzAfter.zoom);
-              } else {
-                animateIiifToPosition(viewerCard, pzAfter.x, pzAfter.y, pzAfter.zoom);
-              }
-            }
-          }
-          viewerCard.pendingZoom = null;
-        });
-      } else {
-        viewerCard.pendingZoom = null;
-      }
-    }).catch((err) => {
-      console.error(`_initOsdInPlate: IiifViewer failed for ${objectId}:`, err);
-      viewerCard.isReady = true;
-      delete plateEl.dataset.loading;
-    });
-    state.viewerCards.push(viewerCard);
-    state.viewerCardCounter++;
-    while (state.viewerCards.length > state.config.maxViewerCards) {
-      const currentScene = sceneIndex;
-      let farthestIdx = 0;
-      let maxDist = -1;
-      for (let i = 0; i < state.viewerCards.length; i++) {
-        const dist = Math.abs(state.viewerCards[i].sceneIndex - currentScene);
-        if (dist > maxDist) {
-          maxDist = dist;
-          farthestIdx = i;
-        }
-      }
-      const evicted = state.viewerCards.splice(farthestIdx, 1)[0];
-      _evictOsdInstance(evicted);
-    }
-  }
-  function _evictOsdInstance(viewerCard) {
-    if (viewerCard.osdWrapper && typeof viewerCard.osdWrapper.destroy === "function") {
-      viewerCard.osdWrapper.destroy();
-    }
-    viewerCard.osdWrapper = null;
-    viewerCard.osdViewer = null;
-    viewerCard.isReady = false;
-    const viewerInstance = viewerCard.element.querySelector(".viewer-instance");
-    if (viewerInstance) viewerInstance.remove();
-  }
-  function _initVideoInPlate(plateEl, objectId, sceneIndex, zIndex) {
-    const objectData = state.objectsIndex[objectId] || {};
-    const sourceUrl = objectData.source_url || objectData.iiif_manifest || "";
-    const cardType = plateEl.dataset.cardType;
-    const videoId = extractVideoId(cardType, sourceUrl);
-    if (!videoId) {
-      console.error("_initVideoInPlate: no video ID for", objectId, sourceUrl);
-      return;
-    }
-    const clipStart = parseFloat(plateEl.dataset.clipStart) || 0;
-    const clipEnd = parseFloat(plateEl.dataset.clipEnd) || 0;
-    const loop = _isTruthy(plateEl.dataset.loop);
-    plateEl.style.zIndex = zIndex;
-    createVideoPlayer(plateEl, cardType, videoId, {
-      clipStart,
-      clipEnd: clipEnd || void 0,
-      loop,
-      sceneIndex,
-      sourceUrl,
-      onPlay: () => {
-      },
-      onTimeUpdate: () => {
-      },
-      onEnded: () => {
-        applyClipEndDim(plateEl);
-      },
-      onAutoplayBlocked: () => {
-        _showVideoPlayOverlay(plateEl);
-      }
-    });
-  }
-  function _initAudioInPlate(plateEl, objectId, sceneIndex, zIndex) {
-    const audioObjects = window.storyData?.audioObjects || window.audioObjects || {};
-    const ext = audioObjects[objectId];
-    if (!ext) {
-      console.error("_initAudioInPlate: no audio extension for", objectId);
-      return;
-    }
-    const basePath = getBasePath();
-    const audioUrl = `${basePath}/telar-content/objects/${objectId}.${ext}`;
-    const peaksUrl = `${basePath}/assets/audio/peaks/${objectId}.json`;
-    const clipStart = parseFloat(plateEl.dataset.clipStart) || 0;
-    const clipEnd = parseFloat(plateEl.dataset.clipEnd) || 0;
-    const loop = _isTruthy(plateEl.dataset.loop);
-    const isEmbed = document.body.classList.contains("embed-mode");
-    plateEl.style.zIndex = zIndex;
-    createAudioPlayer(plateEl, audioUrl, peaksUrl, {
-      clipStart,
-      clipEnd: clipEnd || void 0,
-      loop,
-      sceneIndex,
-      isEmbed,
-      onPlay: () => {
-      },
-      onTimeUpdate: () => {
-      },
-      onEnded: () => {
-        applyAudioClipEndDim(plateEl);
-      },
-      onAutoplayBlocked: () => {
-      }
-    });
-  }
-  function _initModelInPlate(plateEl, objectId, sceneIndex, zIndex, cameraOrbit, cameraTarget) {
-    const modelObjects = window.storyData?.modelObjects || window.modelObjects || {};
-    const ext = modelObjects[objectId];
-    if (!ext) {
-      console.error("_initModelInPlate: no model extension for", objectId);
-      return;
-    }
-    const basePath = getBasePath();
-    const primaryUrl = `${basePath}/telar-content/objects/${objectId}.${ext}`;
-    const otherExt = ext === "glb" ? "gltf" : "glb";
-    const fallbackUrl = `${basePath}/telar-content/objects/${objectId}.${otherExt}`;
-    const objectData = state.objectsIndex[objectId] || {};
-    const alt = objectData.alt_text || objectData.title || objectId;
-    plateEl.style.zIndex = zIndex;
-    createModelPlayer(plateEl, primaryUrl, fallbackUrl, {
-      cameraOrbit: cameraOrbit || plateEl.dataset.cameraOrbit || "",
-      cameraTarget: cameraTarget || plateEl.dataset.cameraTarget || "",
-      sceneIndex,
-      alt
-    });
-  }
-  function _deactivatePreviousTextCard(newIndex, direction) {
-    const prevCard = state.cardPool.find((c) => c.element.classList.contains("is-active"));
-    if (!prevCard || prevCard.stepIndex === newIndex) return;
-    const el = prevCard.element;
-    const messiness = {
-      rot: parseFloat(el.dataset.messinessRot || 0),
-      offX: parseFloat(el.dataset.messinessOffX || 0),
-      offY: parseFloat(el.dataset.messinessOffY || 0)
-    };
-    el.classList.remove("is-active");
-    if (direction === "backward") {
-      el.style.transform = buildTransform(messiness, "translateY(100vh)");
-      el.classList.remove("is-stacked");
-    } else {
-      el.classList.add("is-stacked");
-    }
-  }
-  function _activateTextCard(cardEl) {
-    const messiness = {
-      rot: parseFloat(cardEl.dataset.messinessRot || 0),
-      offX: parseFloat(cardEl.dataset.messinessOffX || 0),
-      offY: parseFloat(cardEl.dataset.messinessOffY || 0)
-    };
-    cardEl.classList.remove("is-stacked");
-    cardEl.classList.add("is-active");
-    cardEl.style.transform = buildTransform(messiness, "translateY(0)");
-    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const isScrubbing = document.querySelector(".card-stack")?.classList.contains("is-scrubbing");
-    if (prefersReduced || isScrubbing) {
-      state.cardOverlayRect = cardEl.getBoundingClientRect();
-      _reframeModelForStep(cardEl);
-      return;
-    }
-    if (cardEl._settleHandler) {
-      cardEl.removeEventListener("transitionend", cardEl._settleHandler);
-    }
-    const onSettled = (ev) => {
-      if (ev.target !== cardEl || ev.propertyName !== "transform") return;
-      cardEl.removeEventListener("transitionend", onSettled);
-      cardEl._settleHandler = null;
-      state.cardOverlayRect = cardEl.getBoundingClientRect();
-      _reframeModelForStep(cardEl, true);
-    };
-    cardEl._settleHandler = onSettled;
-    cardEl.addEventListener("transitionend", onSettled);
-  }
-  function _reframeModelForStep(cardEl, animate = false) {
-    const stepIndex = parseInt(cardEl.dataset.stepIndex, 10);
-    if (isNaN(stepIndex)) return;
-    const sceneIndex = getSceneIndex(stepIndex);
-    const plate = sceneIndex >= 0 ? state.viewerPlates[sceneIndex] : null;
-    if (plate && plate.classList.contains("model-plate")) {
-      frameModelInRegion(plate, animate);
-    }
-  }
-  function _activateTitleCardStep(index2, direction) {
-    const titleCard = state.titleCards[index2];
-    if (!titleCard) return;
-    if (state.activeTitleCardIndex != null && state.activeTitleCardIndex !== index2) {
-      const prevTitle = state.titleCards[state.activeTitleCardIndex];
-      if (prevTitle) {
-        prevTitle.classList.remove("is-active");
-        if (direction === "backward") {
-          prevTitle.style.transform = "translateY(100vh)";
-          prevTitle.classList.remove("is-stacked");
-        } else {
-          prevTitle.classList.add("is-stacked");
-        }
-      }
-    }
-    _deactivatePreviousTextCard(index2, direction);
-    const departingStepIndex = direction === "backward" ? index2 + 1 : index2 - 1;
-    const departingSceneIndex = departingStepIndex >= 0 ? getSceneIndex(departingStepIndex) : -1;
-    const departingPlate = departingSceneIndex >= 0 ? state.viewerPlates[departingSceneIndex] : null;
-    if (departingPlate) {
-      if (direction === "backward") {
-        departingPlate.style.transition = "none";
-        departingPlate.style.transform = "translateY(100%)";
-        void departingPlate.offsetHeight;
-        departingPlate.style.transition = "";
-      }
-      if (departingPlate.classList.contains("video-plate")) {
-        deactivateVideoCard(departingPlate);
-      } else if (departingPlate.classList.contains("audio-plate")) {
-        deactivateAudioCard(departingPlate);
-      } else if (departingPlate.classList.contains("model-plate")) {
-        deactivateModelCard(departingPlate);
-      } else {
-        departingPlate.classList.remove("is-active");
-      }
-    }
-    titleCard.classList.remove("is-stacked");
-    titleCard.classList.add("is-active");
-    titleCard.style.transform = "translateY(0)";
-    state.activeTitleCardIndex = index2;
-    state.currentObjectRun = { objectId: "", runPosition: 0 };
-    state.cardOverlayRect = null;
-    updateObjectCredits("");
-    preloadAhead(index2, _config.preloadSteps, 2);
-  }
-  function _animateViewerToStep(objectId, step, stepIndex) {
-    const x = parseFloat(step.x);
-    const y = parseFloat(step.y);
-    const zoom = parseFloat(step.zoom);
-    if (isNaN(x) || isNaN(y) || isNaN(zoom)) return;
-    const sceneIndex = getSceneIndex(stepIndex);
-    const viewerCard = state.viewerCards.find((vc) => vc.sceneIndex === sceneIndex);
-    if (!viewerCard) return;
-    if (viewerCard.isReady) {
-      animateIiifToPosition(viewerCard, x, y, zoom);
-    } else {
-      viewerCard.pendingZoom = { x, y, zoom, snap: false };
-    }
-  }
-  function preloadAhead(currentIndex, ahead, behind) {
-    const currentScene = getSceneIndex(currentIndex);
-    if (currentScene < 0) return;
-    for (let offset = 1; offset <= ahead; offset++) {
-      const targetScene = currentScene + offset;
-      if (targetScene >= state.totalScenes) break;
-      const plate = state.viewerPlates[targetScene];
-      if (!plate) continue;
-      const firstStepIdx = state.sceneFirstStep[targetScene];
-      const step = _stepsData[firstStepIdx];
-      if (!step) continue;
-      const objectId = step.object || step.objectId || "";
-      if (!objectId) continue;
-      const zIndex = _zPlan.plateZ[firstStepIdx];
-      if (plate.classList.contains("audio-plate")) {
-        if (!plate.querySelector(".waveform-container")) {
-          _initAudioInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else if (plate.classList.contains("video-plate")) {
-        if (!plate.querySelector(".video-iframe, iframe")) {
-          _initVideoInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else if (plate.classList.contains("model-plate")) {
-        if (_modelPlateNeedsInit(plate)) {
-          _initModelInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else {
-        if (state.viewerCards.find((vc) => vc.sceneIndex === targetScene)) continue;
-        const x = parseFloat(step.x);
-        const y = parseFloat(step.y);
-        const zoom = parseFloat(step.zoom);
-        const page = step.page ? parseInt(step.page, 10) : void 0;
-        _initOsdInPlate(plate, objectId, targetScene, zIndex, x, y, zoom, page);
-        _prefetchTilesForScene(targetScene);
-      }
-    }
-    for (let offset = ahead + 1; offset <= ahead + 2; offset++) {
-      const tileScene = currentScene + offset;
-      if (tileScene >= state.totalScenes) break;
-      _prefetchTilesForScene(tileScene);
-    }
-    for (let offset = 1; offset <= behind; offset++) {
-      const targetScene = currentScene - offset;
-      if (targetScene < 0) break;
-      const plate = state.viewerPlates[targetScene];
-      if (!plate) continue;
-      const firstStepIdx = state.sceneFirstStep[targetScene];
-      const step = _stepsData[firstStepIdx];
-      if (!step) continue;
-      const objectId = step.object || step.objectId || "";
-      if (!objectId) continue;
-      const zIndex = _zPlan.plateZ[firstStepIdx];
-      if (plate.classList.contains("audio-plate")) {
-        if (!plate.querySelector(".waveform-container")) {
-          _initAudioInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else if (plate.classList.contains("video-plate")) {
-        if (!plate.querySelector(".video-iframe, iframe")) {
-          _initVideoInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else if (plate.classList.contains("model-plate")) {
-        if (_modelPlateNeedsInit(plate)) {
-          _initModelInPlate(plate, objectId, targetScene, zIndex);
-        }
-      } else {
-        if (state.viewerCards.find((vc) => vc.sceneIndex === targetScene)) continue;
-        const x = parseFloat(step.x);
-        const y = parseFloat(step.y);
-        const zoom = parseFloat(step.zoom);
-        const page = step.page ? parseInt(step.page, 10) : void 0;
-        _initOsdInPlate(plate, objectId, targetScene, zIndex, x, y, zoom, page);
-        _prefetchTilesForScene(targetScene);
-      }
-    }
-  }
-  function _prefetchTilesForScene(sceneIndex) {
-    if (_prefetchedScenes.has(sceneIndex)) return;
-    _prefetchedScenes.add(sceneIndex);
-    const objectId = state.sceneToObject[sceneIndex];
-    if (!objectId) return;
-    const objData = state.objectsIndex?.[objectId];
-    if (objData?.iiif_manifest || objData?.source_url) return;
-    const basePath = getBasePath();
-    const baseUrl = `${window.location.origin}${basePath}/iiif/objects/${objectId}`;
-    const infoUrl = `${baseUrl}/info.json`;
-    fetch(infoUrl).then((r) => r.json()).then((info) => {
-      const firstStepIdx = state.sceneFirstStep[sceneIndex];
-      const step = _stepsData[firstStepIdx];
-      if (!step) return;
-      const x = parseFloat(step.x);
-      const y = parseFloat(step.y);
-      const zoom = parseFloat(step.zoom);
-      if (isNaN(x) || isNaN(y) || isNaN(zoom)) return;
-      const urls = _computeTileUrls(baseUrl, info, x, y, zoom);
-      for (const url of urls) {
-        const link = document.createElement("link");
-        link.rel = "prefetch";
-        link.as = "image";
-        link.href = url;
-        document.head.appendChild(link);
-      }
-    }).catch(() => {
-    });
-  }
-  function _computeTileUrls(baseUrl, info, x, y, zoom) {
-    const imageW = info.width;
-    const imageH = info.height;
-    const tileSize = info.tiles?.[0]?.width || 512;
-    const scaleFactors = info.tiles?.[0]?.scaleFactors || [1];
-    const vpW = window.innerWidth;
-    const vpH = window.innerHeight;
-    const r = state.cardOverlayRect;
-    const cardBox = r ? { x: r.x, y: r.y, w: r.width, h: r.height } : null;
-    const placementMode = _deriveCardPlacement(cardBox, vpW, vpH);
-    const target = computeFocalTarget(x, y, zoom, imageW, imageH, cardBox, placementMode);
-    let centreX, centreY, halfW, halfH;
-    if (target) {
-      centreX = target.focalImg.x;
-      centreY = target.focalImg.y;
-      halfW = target.diameterImg / 2;
-      halfH = target.diameterImg / 2;
-    } else {
-      const vpH2 = window.innerHeight;
-      centreX = x * imageW;
-      centreY = y * imageH;
-      const pixelsPerViewportPx = 1 / (zoom * (vpW / imageW));
-      halfW = vpW * pixelsPerViewportPx / 2;
-      halfH = vpH2 * pixelsPerViewportPx / 2;
-    }
-    const left = Math.max(0, centreX - halfW);
-    const top = Math.max(0, centreY - halfH);
-    const right = Math.min(imageW, centreX + halfW);
-    const bottom = Math.min(imageH, centreY + halfH);
-    let scaleFactor = scaleFactors[0] || 1;
-    for (const sf of scaleFactors) {
-      const effectiveTile2 = tileSize * sf;
-      const tilesX = Math.ceil((right - left) / effectiveTile2);
-      const tilesY = Math.ceil((bottom - top) / effectiveTile2);
-      if (tilesX * tilesY <= 9) {
-        scaleFactor = sf;
-        break;
-      }
-    }
-    const effectiveTile = tileSize * scaleFactor;
-    const urls = [];
-    for (let tx = Math.floor(left / effectiveTile); tx * effectiveTile < right; tx++) {
-      for (let ty = Math.floor(top / effectiveTile); ty * effectiveTile < bottom; ty++) {
-        const rx = tx * effectiveTile;
-        const ry = ty * effectiveTile;
-        const rw = Math.min(effectiveTile, imageW - rx);
-        const rh = Math.min(effectiveTile, imageH - ry);
-        if (rw <= 0 || rh <= 0) continue;
-        const outW = Math.ceil(rw / scaleFactor);
-        const outH = Math.ceil(rh / scaleFactor);
-        const url = `${baseUrl}/${rx},${ry},${rw},${rh}/${outW},/0/default.jpg`;
-        urls.push(url);
-        if (urls.length >= 9) return urls;
-      }
-    }
-    return urls;
-  }
-
   // node_modules/lenis/dist/lenis.mjs
-  var version = "1.3.19";
+  var version = "1.3.23";
   function clamp(min, input, max) {
     return Math.max(min, Math.min(input, max));
   }
@@ -3662,16 +1744,15 @@
     from = 0;
     to = 0;
     currentTime = 0;
-    // These are instanciated in the fromTo method
     lerp;
     duration;
     easing;
     onUpdate;
     /**
-     * Advance the animation by the given delta time
-     *
-     * @param deltaTime - The time in seconds to advance the animation
-     */
+    * Advance the animation by the given delta time
+    *
+    * @param deltaTime - The time in seconds to advance the animation
+    */
     advance(deltaTime) {
       if (!this.isRunning) return;
       let completed = false;
@@ -3683,7 +1764,7 @@
         this.value = this.from + (this.to - this.from) * easedProgress;
       } else if (this.lerp) {
         this.value = damp(this.value, this.to, this.lerp * 60, deltaTime);
-        if (Math.round(this.value) === this.to) {
+        if (Math.round(this.value) === Math.round(this.to)) {
           this.value = this.to;
           completed = true;
         }
@@ -3691,9 +1772,7 @@
         this.value = this.to;
         completed = true;
       }
-      if (completed) {
-        this.stop();
-      }
+      if (completed) this.stop();
       this.onUpdate?.(this.value, completed);
     }
     /** Stop the animation */
@@ -3701,13 +1780,13 @@
       this.isRunning = false;
     }
     /**
-     * Set up the animation from a starting value to an ending value
-     * with optional parameters for lerping, duration, easing, and onUpdate callback
-     *
-     * @param from - The starting value
-     * @param to - The ending value
-     * @param options - Options for the animation
-     */
+    * Set up the animation from a starting value to an ending value
+    * with optional parameters for lerping, duration, easing, and onUpdate callback
+    *
+    * @param from - The starting value
+    * @param to - The ending value
+    * @param options - Options for the animation
+    */
     fromTo(from, to, { lerp: lerp2, duration, easing, onStart, onUpdate }) {
       this.from = this.value = from;
       this.to = to;
@@ -3731,14 +1810,20 @@
     };
   }
   var Dimensions = class {
+    width = 0;
+    height = 0;
+    scrollHeight = 0;
+    scrollWidth = 0;
+    debouncedResize;
+    wrapperResizeObserver;
+    contentResizeObserver;
     constructor(wrapper, content, { autoResize = true, debounce: debounceValue = 250 } = {}) {
       this.wrapper = wrapper;
       this.content = content;
       if (autoResize) {
         this.debouncedResize = debounce(this.resize, debounceValue);
-        if (this.wrapper instanceof Window) {
-          window.addEventListener("resize", this.debouncedResize);
-        } else {
+        if (this.wrapper instanceof Window) window.addEventListener("resize", this.debouncedResize);
+        else {
           this.wrapperResizeObserver = new ResizeObserver(this.debouncedResize);
           this.wrapperResizeObserver.observe(this.wrapper);
         }
@@ -3747,20 +1832,10 @@
       }
       this.resize();
     }
-    width = 0;
-    height = 0;
-    scrollHeight = 0;
-    scrollWidth = 0;
-    // These are instanciated in the constructor as they need information from the options
-    debouncedResize;
-    wrapperResizeObserver;
-    contentResizeObserver;
     destroy() {
       this.wrapperResizeObserver?.disconnect();
       this.contentResizeObserver?.disconnect();
-      if (this.wrapper === window && this.debouncedResize) {
-        window.removeEventListener("resize", this.debouncedResize);
-      }
+      if (this.wrapper === window && this.debouncedResize) window.removeEventListener("resize", this.debouncedResize);
     }
     resize = () => {
       this.onWrapperResize();
@@ -3794,43 +1869,38 @@
   var Emitter = class {
     events = {};
     /**
-     * Emit an event with the given data
-     * @param event Event name
-     * @param args Data to pass to the event handlers
-     */
+    * Emit an event with the given data
+    * @param event Event name
+    * @param args Data to pass to the event handlers
+    */
     emit(event, ...args) {
       const callbacks = this.events[event] || [];
-      for (let i = 0, length = callbacks.length; i < length; i++) {
-        callbacks[i]?.(...args);
-      }
+      for (let i = 0, length = callbacks.length; i < length; i++) callbacks[i]?.(...args);
     }
     /**
-     * Add a callback to the event
-     * @param event Event name
-     * @param cb Callback function
-     * @returns Unsubscribe function
-     */
+    * Add a callback to the event
+    * @param event Event name
+    * @param cb Callback function
+    * @returns Unsubscribe function
+    */
     on(event, cb) {
-      if (this.events[event]) {
-        this.events[event].push(cb);
-      } else {
-        this.events[event] = [cb];
-      }
+      if (this.events[event]) this.events[event].push(cb);
+      else this.events[event] = [cb];
       return () => {
         this.events[event] = this.events[event]?.filter((i) => cb !== i);
       };
     }
     /**
-     * Remove a callback from the event
-     * @param event Event name
-     * @param callback Callback function
-     */
+    * Remove a callback from the event
+    * @param event Event name
+    * @param callback Callback function
+    */
     off(event, callback) {
       this.events[event] = this.events[event]?.filter((i) => callback !== i);
     }
     /**
-     * Remove all event listeners and clean up
-     */
+    * Remove all event listeners and clean up
+    */
     destroy() {
       this.events = {};
     }
@@ -3843,24 +1913,6 @@
     return 1;
   }
   var VirtualScroll = class {
-    constructor(element, options = { wheelMultiplier: 1, touchMultiplier: 1 }) {
-      this.element = element;
-      this.options = options;
-      window.addEventListener("resize", this.onWindowResize);
-      this.onWindowResize();
-      this.element.addEventListener("wheel", this.onWheel, listenerOptions);
-      this.element.addEventListener(
-        "touchstart",
-        this.onTouchStart,
-        listenerOptions
-      );
-      this.element.addEventListener(
-        "touchmove",
-        this.onTouchMove,
-        listenerOptions
-      );
-      this.element.addEventListener("touchend", this.onTouchEnd, listenerOptions);
-    }
     touchStart = {
       x: 0,
       y: 0
@@ -3874,12 +1926,25 @@
       height: 0
     };
     emitter = new Emitter();
+    constructor(element, options = {
+      wheelMultiplier: 1,
+      touchMultiplier: 1
+    }) {
+      this.element = element;
+      this.options = options;
+      window.addEventListener("resize", this.onWindowResize);
+      this.onWindowResize();
+      this.element.addEventListener("wheel", this.onWheel, listenerOptions);
+      this.element.addEventListener("touchstart", this.onTouchStart, listenerOptions);
+      this.element.addEventListener("touchmove", this.onTouchMove, listenerOptions);
+      this.element.addEventListener("touchend", this.onTouchEnd, listenerOptions);
+    }
     /**
-     * Add an event listener for the given event and callback
-     *
-     * @param event Event name
-     * @param callback Callback function
-     */
+    * Add an event listener for the given event and callback
+    *
+    * @param event Event name
+    * @param callback Callback function
+    */
     on(event, callback) {
       return this.emitter.on(event, callback);
     }
@@ -3888,27 +1953,15 @@
       this.emitter.destroy();
       window.removeEventListener("resize", this.onWindowResize);
       this.element.removeEventListener("wheel", this.onWheel, listenerOptions);
-      this.element.removeEventListener(
-        "touchstart",
-        this.onTouchStart,
-        listenerOptions
-      );
-      this.element.removeEventListener(
-        "touchmove",
-        this.onTouchMove,
-        listenerOptions
-      );
-      this.element.removeEventListener(
-        "touchend",
-        this.onTouchEnd,
-        listenerOptions
-      );
+      this.element.removeEventListener("touchstart", this.onTouchStart, listenerOptions);
+      this.element.removeEventListener("touchmove", this.onTouchMove, listenerOptions);
+      this.element.removeEventListener("touchend", this.onTouchEnd, listenerOptions);
     }
     /**
-     * Event handler for 'touchstart' event
-     *
-     * @param event Touch event
-     */
+    * Event handler for 'touchstart' event
+    *
+    * @param event Touch event
+    */
     onTouchStart = (event) => {
       const { clientX, clientY } = event.targetTouches ? event.targetTouches[0] : event;
       this.touchStart.x = clientX;
@@ -3956,7 +2009,11 @@
       deltaY *= multiplierY;
       deltaX *= this.options.wheelMultiplier;
       deltaY *= this.options.wheelMultiplier;
-      this.emitter.emit("scroll", { deltaX, deltaY, event });
+      this.emitter.emit("scroll", {
+        deltaX,
+        deltaY,
+        event
+      });
     };
     onWindowResize = () => {
       this.window = {
@@ -3968,115 +2025,67 @@
   var defaultEasing = (t) => Math.min(1, 1.001 - 2 ** (-10 * t));
   var Lenis = class {
     _isScrolling = false;
-    // true when scroll is animating
     _isStopped = false;
-    // true if user should not be able to scroll - enable/disable programmatically
     _isLocked = false;
-    // same as isStopped but enabled/disabled when scroll reaches target
     _preventNextNativeScrollEvent = false;
     _resetVelocityTimeout = null;
     _rafId = null;
     /**
-     * Whether or not the user is touching the screen
-     */
+    * Whether or not the user is touching the screen
+    */
     isTouching;
     /**
-     * The time in ms since the lenis instance was created
-     */
+    * The time in ms since the lenis instance was created
+    */
     time = 0;
     /**
-     * User data that will be forwarded through the scroll event
-     *
-     * @example
-     * lenis.scrollTo(100, {
-     *   userData: {
-     *     foo: 'bar'
-     *   }
-     * })
-     */
+    * User data that will be forwarded through the scroll event
+    *
+    * @example
+    * lenis.scrollTo(100, {
+    *   userData: {
+    *     foo: 'bar'
+    *   }
+    * })
+    */
     userData = {};
     /**
-     * The last velocity of the scroll
-     */
+    * The last velocity of the scroll
+    */
     lastVelocity = 0;
     /**
-     * The current velocity of the scroll
-     */
+    * The current velocity of the scroll
+    */
     velocity = 0;
     /**
-     * The direction of the scroll
-     */
+    * The direction of the scroll
+    */
     direction = 0;
     /**
-     * The options passed to the lenis instance
-     */
+    * The options passed to the lenis instance
+    */
     options;
     /**
-     * The target scroll value
-     */
+    * The target scroll value
+    */
     targetScroll;
     /**
-     * The animated scroll value
-     */
+    * The animated scroll value
+    */
     animatedScroll;
-    // These are instanciated here as they don't need information from the options
     animate = new Animate();
     emitter = new Emitter();
-    // These are instanciated in the constructor as they need information from the options
     dimensions;
-    // This is not private because it's used in the Snap class
     virtualScroll;
-    constructor({
-      wrapper = window,
-      content = document.documentElement,
-      eventsTarget = wrapper,
-      smoothWheel = true,
-      syncTouch = false,
-      syncTouchLerp = 0.075,
-      touchInertiaExponent = 1.7,
-      duration,
-      // in seconds
-      easing,
-      lerp: lerp2 = 0.1,
-      infinite = false,
-      orientation = "vertical",
-      // vertical, horizontal
-      gestureOrientation = orientation === "horizontal" ? "both" : "vertical",
-      // vertical, horizontal, both
-      touchMultiplier = 1,
-      wheelMultiplier = 1,
-      autoResize = true,
-      prevent,
-      virtualScroll,
-      overscroll = true,
-      autoRaf = false,
-      anchors = false,
-      autoToggle = false,
-      // https://caniuse.com/?search=transition-behavior
-      allowNestedScroll = false,
-      __experimental__naiveDimensions = false,
-      naiveDimensions = __experimental__naiveDimensions,
-      stopInertiaOnNavigate = false
-    } = {}) {
+    constructor({ wrapper = window, content = document.documentElement, eventsTarget = wrapper, smoothWheel = true, syncTouch = false, syncTouchLerp = 0.075, touchInertiaExponent = 1.7, duration, easing, lerp: lerp2 = 0.1, infinite = false, orientation = "vertical", gestureOrientation = orientation === "horizontal" ? "both" : "vertical", touchMultiplier = 1, wheelMultiplier = 1, autoResize = true, prevent, virtualScroll, overscroll = true, autoRaf = false, anchors = false, autoToggle = false, allowNestedScroll = false, __experimental__naiveDimensions = false, naiveDimensions = __experimental__naiveDimensions, stopInertiaOnNavigate = false } = {}) {
       window.lenisVersion = version;
-      if (!window.lenis) {
-        window.lenis = {};
-      }
+      if (!window.lenis) window.lenis = {};
       window.lenis.version = version;
-      if (orientation === "horizontal") {
-        window.lenis.horizontal = true;
-      }
-      if (syncTouch === true) {
-        window.lenis.touch = true;
-      }
-      if (!wrapper || wrapper === document.documentElement) {
-        wrapper = window;
-      }
-      if (typeof duration === "number" && typeof easing !== "function") {
-        easing = defaultEasing;
-      } else if (typeof easing === "function" && typeof duration !== "number") {
-        duration = 1;
-      }
+      if (orientation === "horizontal") window.lenis.horizontal = true;
+      if (syncTouch === true) window.lenis.touch = true;
+      if (!wrapper || wrapper === document.documentElement) wrapper = window;
+      if (typeof duration === "number" && typeof easing !== "function") easing = defaultEasing;
+      else if (typeof easing === "function" && typeof duration !== "number") duration = 1;
       this.options = {
         wrapper,
         content,
@@ -4108,19 +2117,9 @@
       this.updateClassName();
       this.targetScroll = this.animatedScroll = this.actualScroll;
       this.options.wrapper.addEventListener("scroll", this.onNativeScroll);
-      this.options.wrapper.addEventListener("scrollend", this.onScrollEnd, {
-        capture: true
-      });
-      if (this.options.anchors || this.options.stopInertiaOnNavigate) {
-        this.options.wrapper.addEventListener(
-          "click",
-          this.onClick
-        );
-      }
-      this.options.wrapper.addEventListener(
-        "pointerdown",
-        this.onPointerDown
-      );
+      this.options.wrapper.addEventListener("scrollend", this.onScrollEnd, { capture: true });
+      if (this.options.anchors || this.options.stopInertiaOnNavigate) this.options.wrapper.addEventListener("click", this.onClick);
+      this.options.wrapper.addEventListener("pointerdown", this.onPointerDown);
       this.virtualScroll = new VirtualScroll(eventsTarget, {
         touchMultiplier,
         wheelMultiplier
@@ -4130,35 +2129,21 @@
         this.checkOverflow();
         this.rootElement.addEventListener("transitionend", this.onTransitionEnd);
       }
-      if (this.options.autoRaf) {
-        this._rafId = requestAnimationFrame(this.raf);
-      }
+      if (this.options.autoRaf) this._rafId = requestAnimationFrame(this.raf);
     }
     /**
-     * Destroy the lenis instance, remove all event listeners and clean up the class name
-     */
+    * Destroy the lenis instance, remove all event listeners and clean up the class name
+    */
     destroy() {
       this.emitter.destroy();
       this.options.wrapper.removeEventListener("scroll", this.onNativeScroll);
-      this.options.wrapper.removeEventListener("scrollend", this.onScrollEnd, {
-        capture: true
-      });
-      this.options.wrapper.removeEventListener(
-        "pointerdown",
-        this.onPointerDown
-      );
-      if (this.options.anchors || this.options.stopInertiaOnNavigate) {
-        this.options.wrapper.removeEventListener(
-          "click",
-          this.onClick
-        );
-      }
+      this.options.wrapper.removeEventListener("scrollend", this.onScrollEnd, { capture: true });
+      this.options.wrapper.removeEventListener("pointerdown", this.onPointerDown);
+      if (this.options.anchors || this.options.stopInertiaOnNavigate) this.options.wrapper.removeEventListener("click", this.onClick);
       this.virtualScroll.destroy();
       this.dimensions.destroy();
       this.cleanUpClassName();
-      if (this._rafId) {
-        cancelAnimationFrame(this._rafId);
-      }
+      if (this._rafId) cancelAnimationFrame(this._rafId);
     }
     on(event, callback) {
       return this.emitter.on(event, callback);
@@ -4168,58 +2153,41 @@
     }
     onScrollEnd = (e) => {
       if (!(e instanceof CustomEvent)) {
-        if (this.isScrolling === "smooth" || this.isScrolling === false) {
-          e.stopPropagation();
-        }
+        if (this.isScrolling === "smooth" || this.isScrolling === false) e.stopPropagation();
       }
     };
     dispatchScrollendEvent = () => {
-      this.options.wrapper.dispatchEvent(
-        new CustomEvent("scrollend", {
-          bubbles: this.options.wrapper === window,
-          // cancelable: false,
-          detail: {
-            lenisScrollEnd: true
-          }
-        })
-      );
+      this.options.wrapper.dispatchEvent(new CustomEvent("scrollend", {
+        bubbles: this.options.wrapper === window,
+        detail: { lenisScrollEnd: true }
+      }));
     };
     get overflow() {
       const property = this.isHorizontal ? "overflow-x" : "overflow-y";
       return getComputedStyle(this.rootElement)[property];
     }
     checkOverflow() {
-      if (["hidden", "clip"].includes(this.overflow)) {
-        this.internalStop();
-      } else {
-        this.internalStart();
-      }
+      if (["hidden", "clip"].includes(this.overflow)) this.internalStop();
+      else this.internalStart();
     }
     onTransitionEnd = (event) => {
-      if (event.propertyName.includes("overflow")) {
-        this.checkOverflow();
-      }
+      if (event.propertyName?.includes("overflow") && event.target === this.rootElement) this.checkOverflow();
     };
     setScroll(scroll) {
-      if (this.isHorizontal) {
-        this.options.wrapper.scrollTo({ left: scroll, behavior: "instant" });
-      } else {
-        this.options.wrapper.scrollTo({ top: scroll, behavior: "instant" });
-      }
+      if (this.isHorizontal) this.options.wrapper.scrollTo({
+        left: scroll,
+        behavior: "instant"
+      });
+      else this.options.wrapper.scrollTo({
+        top: scroll,
+        behavior: "instant"
+      });
     }
     onClick = (event) => {
-      const path = event.composedPath();
-      const linkElements = path.filter(
-        (node) => node instanceof HTMLAnchorElement && node.href
-      );
-      const linkElementsUrls = linkElements.map(
-        (element) => new URL(element.href)
-      );
+      const linkElementsUrls = event.composedPath().filter((node) => node instanceof HTMLAnchorElement && node.href).map((element) => new URL(element.href));
       const currentUrl = new URL(window.location.href);
       if (this.options.anchors) {
-        const anchorElementUrl = linkElementsUrls.find(
-          (targetUrl) => currentUrl.host === targetUrl.host && currentUrl.pathname === targetUrl.pathname && targetUrl.hash
-        );
+        const anchorElementUrl = linkElementsUrls.find((targetUrl) => currentUrl.host === targetUrl.host && currentUrl.pathname === targetUrl.pathname && targetUrl.hash);
         if (anchorElementUrl) {
           const options = typeof this.options.anchors === "object" && this.options.anchors ? this.options.anchors : void 0;
           const target = `#${anchorElementUrl.hash.split("#")[1]}`;
@@ -4228,87 +2196,64 @@
         }
       }
       if (this.options.stopInertiaOnNavigate) {
-        const hasPageLinkElementUrl = linkElementsUrls.some(
-          (targetUrl) => currentUrl.host === targetUrl.host && currentUrl.pathname !== targetUrl.pathname
-        );
-        if (hasPageLinkElementUrl) {
+        if (linkElementsUrls.some((targetUrl) => currentUrl.host === targetUrl.host && currentUrl.pathname !== targetUrl.pathname)) {
           this.reset();
           return;
         }
       }
     };
     onPointerDown = (event) => {
-      if (event.button === 1) {
-        this.reset();
-      }
+      if (event.button === 1) this.reset();
     };
     onVirtualScroll = (data) => {
-      if (typeof this.options.virtualScroll === "function" && this.options.virtualScroll(data) === false)
-        return;
+      if (typeof this.options.virtualScroll === "function" && this.options.virtualScroll(data) === false) return;
       const { deltaX, deltaY, event } = data;
-      this.emitter.emit("virtual-scroll", { deltaX, deltaY, event });
+      this.emitter.emit("virtual-scroll", {
+        deltaX,
+        deltaY,
+        event
+      });
       if (event.ctrlKey) return;
       if (event.lenisStopPropagation) return;
       const isTouch = event.type.includes("touch");
       const isWheel = event.type.includes("wheel");
       this.isTouching = event.type === "touchstart" || event.type === "touchmove";
       const isClickOrTap = deltaX === 0 && deltaY === 0;
-      const isTapToStop = this.options.syncTouch && isTouch && event.type === "touchstart" && isClickOrTap && !this.isStopped && !this.isLocked;
-      if (isTapToStop) {
+      if (this.options.syncTouch && isTouch && event.type === "touchstart" && isClickOrTap && !this.isStopped && !this.isLocked) {
         this.reset();
         return;
       }
       const isUnknownGesture = this.options.gestureOrientation === "vertical" && deltaY === 0 || this.options.gestureOrientation === "horizontal" && deltaX === 0;
-      if (isClickOrTap || isUnknownGesture) {
-        return;
-      }
+      if (isClickOrTap || isUnknownGesture) return;
       let composedPath = event.composedPath();
       composedPath = composedPath.slice(0, composedPath.indexOf(this.rootElement));
       const prevent = this.options.prevent;
       const gestureOrientation = Math.abs(deltaX) >= Math.abs(deltaY) ? "horizontal" : "vertical";
-      if (composedPath.find(
-        (node) => node instanceof HTMLElement && (typeof prevent === "function" && prevent?.(node) || node.hasAttribute?.("data-lenis-prevent") || gestureOrientation === "vertical" && node.hasAttribute?.("data-lenis-prevent-vertical") || gestureOrientation === "horizontal" && node.hasAttribute?.("data-lenis-prevent-horizontal") || isTouch && node.hasAttribute?.("data-lenis-prevent-touch") || isWheel && node.hasAttribute?.("data-lenis-prevent-wheel") || this.options.allowNestedScroll && this.hasNestedScroll(node, {
-          deltaX,
-          deltaY
-        }))
-      ))
-        return;
+      if (composedPath.find((node) => node instanceof HTMLElement && (typeof prevent === "function" && prevent?.(node) || node.hasAttribute?.("data-lenis-prevent") || gestureOrientation === "vertical" && node.hasAttribute?.("data-lenis-prevent-vertical") || gestureOrientation === "horizontal" && node.hasAttribute?.("data-lenis-prevent-horizontal") || isTouch && node.hasAttribute?.("data-lenis-prevent-touch") || isWheel && node.hasAttribute?.("data-lenis-prevent-wheel") || this.options.allowNestedScroll && this.hasNestedScroll(node, {
+        deltaX,
+        deltaY
+      })))) return;
       if (this.isStopped || this.isLocked) {
-        if (event.cancelable) {
-          event.preventDefault();
-        }
+        if (event.cancelable) event.preventDefault();
         return;
       }
-      const isSmooth = this.options.syncTouch && isTouch || this.options.smoothWheel && isWheel;
-      if (!isSmooth) {
+      if (!(this.options.syncTouch && isTouch || this.options.smoothWheel && isWheel)) {
         this.isScrolling = "native";
         this.animate.stop();
         event.lenisStopPropagation = true;
         return;
       }
       let delta = deltaY;
-      if (this.options.gestureOrientation === "both") {
-        delta = Math.abs(deltaY) > Math.abs(deltaX) ? deltaY : deltaX;
-      } else if (this.options.gestureOrientation === "horizontal") {
-        delta = deltaX;
-      }
-      if (!this.options.overscroll || this.options.infinite || this.options.wrapper !== window && this.limit > 0 && (this.animatedScroll > 0 && this.animatedScroll < this.limit || this.animatedScroll === 0 && deltaY > 0 || this.animatedScroll === this.limit && deltaY < 0)) {
-        event.lenisStopPropagation = true;
-      }
-      if (event.cancelable) {
-        event.preventDefault();
-      }
+      if (this.options.gestureOrientation === "both") delta = Math.abs(deltaY) > Math.abs(deltaX) ? deltaY : deltaX;
+      else if (this.options.gestureOrientation === "horizontal") delta = deltaX;
+      if (!this.options.overscroll || this.options.infinite || this.options.wrapper !== window && this.limit > 0 && (this.animatedScroll > 0 && this.animatedScroll < this.limit || this.animatedScroll === 0 && deltaY > 0 || this.animatedScroll === this.limit && deltaY < 0)) event.lenisStopPropagation = true;
+      if (event.cancelable) event.preventDefault();
       const isSyncTouch = isTouch && this.options.syncTouch;
-      const isTouchEnd = isTouch && event.type === "touchend";
-      const hasTouchInertia = isTouchEnd;
-      if (hasTouchInertia) {
-        delta = Math.sign(this.velocity) * Math.abs(this.velocity) ** this.options.touchInertiaExponent;
-      }
+      const hasTouchInertia = isTouch && event.type === "touchend";
+      if (hasTouchInertia) delta = Math.sign(delta) * Math.abs(this.velocity) ** this.options.touchInertiaExponent;
       this.scrollTo(this.targetScroll + delta, {
         programmatic: false,
-        ...isSyncTouch ? {
-          lerp: hasTouchInertia ? this.options.syncTouchLerp : 1
-        } : {
+        ...isSyncTouch ? { lerp: hasTouchInertia ? this.options.syncTouchLerp : 1 } : {
           lerp: this.options.lerp,
           duration: this.options.duration,
           easing: this.options.easing
@@ -4316,8 +2261,8 @@
       });
     };
     /**
-     * Force lenis to recalculate the dimensions
-     */
+    * Force lenis to recalculate the dimensions
+    */
     resize() {
       this.dimensions.resize();
       this.animatedScroll = this.targetScroll = this.actualScroll;
@@ -4340,21 +2285,15 @@
         this.animatedScroll = this.targetScroll = this.actualScroll;
         this.lastVelocity = this.velocity;
         this.velocity = this.animatedScroll - lastScroll;
-        this.direction = Math.sign(
-          this.animatedScroll - lastScroll
-        );
-        if (!this.isStopped) {
-          this.isScrolling = "native";
-        }
+        this.direction = Math.sign(this.animatedScroll - lastScroll);
+        if (!this.isStopped) this.isScrolling = "native";
         this.emit();
-        if (this.velocity !== 0) {
-          this._resetVelocityTimeout = setTimeout(() => {
-            this.lastVelocity = this.velocity;
-            this.velocity = 0;
-            this.isScrolling = false;
-            this.emit();
-          }, 400);
-        }
+        if (this.velocity !== 0) this._resetVelocityTimeout = setTimeout(() => {
+          this.lastVelocity = this.velocity;
+          this.velocity = 0;
+          this.isScrolling = false;
+          this.emit();
+        }, 400);
       }
     };
     reset() {
@@ -4365,8 +2304,8 @@
       this.animate.stop();
     }
     /**
-     * Start lenis scroll after it has been stopped
-     */
+    * Start lenis scroll after it has been stopped
+    */
     start() {
       if (!this.isStopped) return;
       if (this.options.autoToggle) {
@@ -4382,8 +2321,8 @@
       this.emit();
     }
     /**
-     * Stop lenis scroll
-     */
+    * Stop lenis scroll
+    */
     stop() {
       if (this.isStopped) return;
       if (this.options.autoToggle) {
@@ -4399,99 +2338,81 @@
       this.emit();
     }
     /**
-     * RequestAnimationFrame for lenis
-     *
-     * @param time The time in ms from an external clock like `requestAnimationFrame` or Tempus
-     */
+    * RequestAnimationFrame for lenis
+    *
+    * @param time The time in ms from an external clock like `requestAnimationFrame` or Tempus
+    */
     raf = (time) => {
       const deltaTime = time - (this.time || time);
       this.time = time;
       this.animate.advance(deltaTime * 1e-3);
-      if (this.options.autoRaf) {
-        this._rafId = requestAnimationFrame(this.raf);
-      }
+      if (this.options.autoRaf) this._rafId = requestAnimationFrame(this.raf);
     };
     /**
-     * Scroll to a target value
-     *
-     * @param target The target value to scroll to
-     * @param options The options for the scroll
-     *
-     * @example
-     * lenis.scrollTo(100, {
-     *   offset: 100,
-     *   duration: 1,
-     *   easing: (t) => 1 - Math.cos((t * Math.PI) / 2),
-     *   lerp: 0.1,
-     *   onStart: () => {
-     *     console.log('onStart')
-     *   },
-     *   onComplete: () => {
-     *     console.log('onComplete')
-     *   },
-     * })
-     */
-    scrollTo(_target, {
-      offset = 0,
-      immediate = false,
-      lock = false,
-      programmatic = true,
-      // called from outside of the class
-      lerp: lerp2 = programmatic ? this.options.lerp : void 0,
-      duration = programmatic ? this.options.duration : void 0,
-      easing = programmatic ? this.options.easing : void 0,
-      onStart,
-      onComplete,
-      force = false,
-      // scroll even if stopped
-      userData
-    } = {}) {
+    * Scroll to a target value
+    *
+    * @param target The target value to scroll to
+    * @param options The options for the scroll
+    *
+    * @example
+    * lenis.scrollTo(100, {
+    *   offset: 100,
+    *   duration: 1,
+    *   easing: (t) => 1 - Math.cos((t * Math.PI) / 2),
+    *   lerp: 0.1,
+    *   onStart: () => {
+    *     console.log('onStart')
+    *   },
+    *   onComplete: () => {
+    *     console.log('onComplete')
+    *   },
+    * })
+    */
+    scrollTo(_target, { offset = 0, immediate = false, lock = false, programmatic = true, lerp: lerp2 = programmatic ? this.options.lerp : void 0, duration = programmatic ? this.options.duration : void 0, easing = programmatic ? this.options.easing : void 0, onStart, onComplete, force = false, userData } = {}) {
       if ((this.isStopped || this.isLocked) && !force) return;
       let target = _target;
       let adjustedOffset = offset;
-      if (typeof target === "string" && ["top", "left", "start", "#"].includes(target)) {
-        target = 0;
-      } else if (typeof target === "string" && ["bottom", "right", "end"].includes(target)) {
-        target = this.limit;
-      } else {
+      if (typeof target === "string" && [
+        "top",
+        "left",
+        "start",
+        "#"
+      ].includes(target)) target = 0;
+      else if (typeof target === "string" && [
+        "bottom",
+        "right",
+        "end"
+      ].includes(target)) target = this.limit;
+      else {
         let node = null;
         if (typeof target === "string") {
           node = document.querySelector(target);
-          if (!node) {
-            if (target === "#top") {
-              target = 0;
-            } else {
-              console.warn("Lenis: Target not found", target);
-            }
-          }
-        } else if (target instanceof HTMLElement && target?.nodeType) {
-          node = target;
-        }
+          if (!node) if (target === "#top") target = 0;
+          else console.warn("Lenis: Target not found", target);
+        } else if (target instanceof HTMLElement && target?.nodeType) node = target;
         if (node) {
           if (this.options.wrapper !== window) {
             const wrapperRect = this.rootElement.getBoundingClientRect();
             adjustedOffset -= this.isHorizontal ? wrapperRect.left : wrapperRect.top;
           }
           const rect = node.getBoundingClientRect();
-          target = (this.isHorizontal ? rect.left : rect.top) + this.animatedScroll;
+          const targetStyle = getComputedStyle(node);
+          const scrollMargin = this.isHorizontal ? Number.parseFloat(targetStyle.scrollMarginLeft) : Number.parseFloat(targetStyle.scrollMarginTop);
+          const containerStyle = getComputedStyle(this.rootElement);
+          const scrollPadding = this.isHorizontal ? Number.parseFloat(containerStyle.scrollPaddingLeft) : Number.parseFloat(containerStyle.scrollPaddingTop);
+          target = (this.isHorizontal ? rect.left : rect.top) + this.animatedScroll - (Number.isNaN(scrollMargin) ? 0 : scrollMargin) - (Number.isNaN(scrollPadding) ? 0 : scrollPadding);
         }
       }
       if (typeof target !== "number") return;
       target += adjustedOffset;
-      target = Math.round(target);
       if (this.options.infinite) {
         if (programmatic) {
           this.targetScroll = this.animatedScroll = this.scroll;
           const distance = target - this.animatedScroll;
-          if (distance > this.limit / 2) {
-            target -= this.limit;
-          } else if (distance < -this.limit / 2) {
-            target += this.limit;
-          }
+          if (distance > this.limit / 2) target -= this.limit;
+          else if (distance < -this.limit / 2) target += this.limit;
         }
-      } else {
-        target = clamp(0, target, this.limit);
-      }
+      } else target = clamp(0, target, this.limit);
       if (target === this.targetScroll) {
         onStart?.(this);
         onComplete?.(this);
@@ -4511,14 +2432,9 @@
         });
         return;
       }
-      if (!programmatic) {
-        this.targetScroll = target;
-      }
-      if (typeof duration === "number" && typeof easing !== "function") {
-        easing = defaultEasing;
-      } else if (typeof easing === "function" && typeof duration !== "number") {
-        duration = 1;
-      }
+      if (!programmatic) this.targetScroll = target;
+      if (typeof duration === "number" && typeof easing !== "function") easing = defaultEasing;
+      else if (typeof easing === "function" && typeof duration !== "number") duration = 1;
       this.animate.fromTo(this.animatedScroll, target, {
         duration,
         easing,
@@ -4535,9 +2451,7 @@
           this.direction = Math.sign(this.velocity);
           this.animatedScroll = value;
           this.setScroll(this.scroll);
-          if (programmatic) {
-            this.targetScroll = value;
-          }
+          if (programmatic) this.targetScroll = value;
           if (!completed) this.emit();
           if (completed) {
             this.reset();
@@ -4576,18 +2490,18 @@
         cache.time = Date.now();
         const computedStyle = window.getComputedStyle(node);
         cache.computedStyle = computedStyle;
-        hasOverflowX = ["auto", "overlay", "scroll"].includes(
-          computedStyle.overflowX
-        );
-        hasOverflowY = ["auto", "overlay", "scroll"].includes(
-          computedStyle.overflowY
-        );
-        hasOverscrollBehaviorX = ["auto"].includes(
-          computedStyle.overscrollBehaviorX
-        );
-        hasOverscrollBehaviorY = ["auto"].includes(
-          computedStyle.overscrollBehaviorY
-        );
+        hasOverflowX = [
+          "auto",
+          "overlay",
+          "scroll"
+        ].includes(computedStyle.overflowX);
+        hasOverflowY = [
+          "auto",
+          "overlay",
+          "scroll"
+        ].includes(computedStyle.overflowY);
+        hasOverscrollBehaviorX = ["auto"].includes(computedStyle.overscrollBehaviorX);
+        hasOverscrollBehaviorY = ["auto"].includes(computedStyle.overscrollBehaviorY);
         cache.hasOverflowX = hasOverflowX;
         cache.hasOverflowY = hasOverflowY;
         if (!(hasOverflowX || hasOverflowY)) return false;
@@ -4617,9 +2531,7 @@
         hasOverscrollBehaviorX = cache.hasOverscrollBehaviorX;
         hasOverscrollBehaviorY = cache.hasOverscrollBehaviorY;
       }
-      if (!(hasOverflowX && isScrollableX || hasOverflowY && isScrollableY)) {
-        return false;
-      }
+      if (!(hasOverflowX && isScrollableX || hasOverflowY && isScrollableY)) return false;
       const orientation = Math.abs(deltaX) >= Math.abs(deltaY) ? "horizontal" : "vertical";
       let scroll;
       let maxScroll;
@@ -4641,61 +2553,54 @@
         hasOverflow = hasOverflowY;
         isScrollable = isScrollableY;
         hasOverscrollBehavior = hasOverscrollBehaviorY;
-      } else {
-        return false;
-      }
-      if (!hasOverscrollBehavior && (scroll >= maxScroll || scroll <= 0)) {
-        return true;
-      }
-      const willScroll = delta > 0 ? scroll < maxScroll : scroll > 0;
-      return willScroll && hasOverflow && isScrollable;
+      } else return false;
+      if (!hasOverscrollBehavior && (scroll >= maxScroll || scroll <= 0)) return true;
+      return (delta > 0 ? scroll < maxScroll : scroll > 0) && hasOverflow && isScrollable;
     }
     /**
-     * The root element on which lenis is instanced
-     */
+    * The root element on which lenis is instanced
+    */
     get rootElement() {
       return this.options.wrapper === window ? document.documentElement : this.options.wrapper;
     }
     /**
-     * The limit which is the maximum scroll value
-     */
+    * The limit which is the maximum scroll value
+    */
     get limit() {
       if (this.options.naiveDimensions) {
-        if (this.isHorizontal) {
-          return this.rootElement.scrollWidth - this.rootElement.clientWidth;
-        }
+        if (this.isHorizontal) return this.rootElement.scrollWidth - this.rootElement.clientWidth;
         return this.rootElement.scrollHeight - this.rootElement.clientHeight;
       }
       return this.dimensions.limit[this.isHorizontal ? "x" : "y"];
     }
     /**
-     * Whether or not the scroll is horizontal
-     */
+    * Whether or not the scroll is horizontal
+    */
     get isHorizontal() {
       return this.options.orientation === "horizontal";
     }
     /**
-     * The actual scroll value
-     */
+    * The actual scroll value
+    */
     get actualScroll() {
       const wrapper = this.options.wrapper;
       return this.isHorizontal ? wrapper.scrollX ?? wrapper.scrollLeft : wrapper.scrollY ?? wrapper.scrollTop;
     }
     /**
-     * The current scroll value
-     */
+    * The current scroll value
+    */
     get scroll() {
       return this.options.infinite ? modulo(this.animatedScroll, this.limit) : this.animatedScroll;
     }
     /**
-     * The progress of the scroll relative to the limit
-     */
+    * The progress of the scroll relative to the limit
+    */
     get progress() {
       return this.limit === 0 ? 1 : this.scroll / this.limit;
     }
     /**
-     * Current scroll state
-     */
+    * Current scroll state
+    */
     get isScrolling() {
       return this._isScrolling;
     }
@@ -4706,8 +2611,8 @@
       }
     }
     /**
-     * Check if lenis is stopped
-     */
+    * Check if lenis is stopped
+    */
     get isStopped() {
       return this._isStopped;
     }
@@ -4718,8 +2623,8 @@
       }
     }
     /**
-     * Check if lenis is locked
-     */
+    * Check if lenis is locked
+    */
     get isLocked() {
       return this._isLocked;
     }
@@ -4730,14 +2635,14 @@
       }
     }
     /**
-     * Check if lenis is smooth scrolling
-     */
+    * Check if lenis is smooth scrolling
+    */
     get isSmooth() {
       return this.isScrolling === "smooth";
     }
     /**
-     * The class name applied to the wrapper element
-     */
+    * The class name applied to the wrapper element
+    */
     get className() {
       let className = "lenis";
       if (this.options.autoToggle) className += " lenis-autoToggle";
@@ -4749,10 +2654,12 @@
     }
     updateClassName() {
       this.cleanUpClassName();
-      this.rootElement.className = `${this.rootElement.className} ${this.className}`.trim();
+      this.className.split(" ").forEach((className) => {
+        this.rootElement.classList.add(className);
+      });
     }
     cleanUpClassName() {
-      this.rootElement.className = this.rootElement.className.replace(/lenis(-\w+)?/g, "").trim();
+      for (const className of Array.from(this.rootElement.classList)) if (className === "lenis" || className.startsWith("lenis-")) this.rootElement.classList.remove(className);
     }
   };
 
@@ -4768,69 +2675,54 @@
     };
   }
   function removeParentSticky(element) {
-    const position = getComputedStyle(element).position;
-    const isSticky = position === "sticky";
-    if (isSticky) {
+    if (getComputedStyle(element).position === "sticky") {
       element.style.setProperty("position", "static");
       element.dataset.sticky = "true";
     }
-    if (element.offsetParent) {
-      removeParentSticky(element.offsetParent);
-    }
+    if (element.offsetParent) removeParentSticky(element.offsetParent);
   }
   function addParentSticky(element) {
     if (element?.dataset?.sticky === "true") {
       element.style.removeProperty("position");
       delete element.dataset.sticky;
     }
-    if (element.offsetParent) {
-      addParentSticky(element.offsetParent);
-    }
+    if (element.offsetParent) addParentSticky(element.offsetParent);
   }
   function offsetTop(element, accumulator = 0) {
     const top = accumulator + element.offsetTop;
-    if (element.offsetParent) {
-      return offsetTop(element.offsetParent, top);
-    }
+    if (element.offsetParent) return offsetTop(element.offsetParent, top);
     return top;
   }
   function offsetLeft(element, accumulator = 0) {
     const left = accumulator + element.offsetLeft;
-    if (element.offsetParent) {
-      return offsetLeft(element.offsetParent, left);
-    }
+    if (element.offsetParent) return offsetLeft(element.offsetParent, left);
     return left;
   }
   function scrollTop(element, accumulator = 0) {
     const top = accumulator + element.scrollTop;
-    if (element.offsetParent) {
-      return scrollTop(element.offsetParent, top);
-    }
+    if (element.offsetParent) return scrollTop(element.offsetParent, top);
     return top + window.scrollY;
   }
   function scrollLeft(element, accumulator = 0) {
     const left = accumulator + element.scrollLeft;
-    if (element.offsetParent) {
-      return scrollLeft(element.offsetParent, left);
-    }
+    if (element.offsetParent) return scrollLeft(element.offsetParent, left);
     return left + window.scrollX;
   }
   var SnapElement = class {
     element;
     options;
     align;
-    // @ts-expect-error
     rect = {};
     wrapperResizeObserver;
     resizeObserver;
     debouncedWrapperResize;
-    constructor(element, {
-      align = ["start"],
-      ignoreSticky = true,
-      ignoreTransform = false
-    } = {}) {
+    constructor(element, { align = ["start"], ignoreSticky = true, ignoreTransform = false } = {}) {
       this.element = element;
-      this.options = { align, ignoreSticky, ignoreTransform };
+      this.options = {
+        align,
+        ignoreSticky,
+        ignoreTransform
+      };
       this.align = [align].flat();
       this.debouncedWrapperResize = debounce2(this.onWrapperResize, 500);
       this.wrapperResizeObserver = new ResizeObserver(this.debouncedWrapperResize);
@@ -4847,20 +2739,13 @@
       this.wrapperResizeObserver.disconnect();
       this.resizeObserver.disconnect();
     }
-    setRect({
-      top,
-      left,
-      width,
-      height,
-      element
-    } = {}) {
+    setRect({ top, left, width, height, element } = {}) {
       top = top ?? this.rect.top;
       left = left ?? this.rect.left;
       width = width ?? this.rect.width;
       height = height ?? this.rect.height;
       element = element ?? this.rect.element;
-      if (top === this.rect.top && left === this.rect.left && width === this.rect.width && height === this.rect.height && element === this.rect.element)
-        return;
+      if (top === this.rect.top && left === this.rect.left && width === this.rect.width && height === this.rect.height && element === this.rect.element) return;
       this.rect.top = top;
       this.rect.y = top;
       this.rect.width = width;
@@ -4883,13 +2768,19 @@
         left = rect.left + scrollLeft(this.element);
       }
       if (this.options.ignoreSticky) addParentSticky(this.element);
-      this.setRect({ top, left });
+      this.setRect({
+        top,
+        left
+      });
     };
     onResize = ([entry]) => {
       if (!entry?.borderBoxSize[0]) return;
       const width = entry.borderBoxSize[0].inlineSize;
       const height = entry.borderBoxSize[0].blockSize;
-      this.setRect({ width, height });
+      this.setRect({
+        width,
+        height
+      });
     };
   };
   var index = 0;
@@ -4897,21 +2788,19 @@
     return index++;
   }
   var Snap = class {
-    constructor(lenis2, {
-      type = "proximity",
-      lerp: lerp2,
-      easing,
-      duration,
-      distanceThreshold = "50%",
-      // useless when type is "mandatory"
-      debounce: debounceDelay = 500,
-      onSnapStart,
-      onSnapComplete
-    } = {}) {
+    options;
+    elements = /* @__PURE__ */ new Map();
+    snaps = /* @__PURE__ */ new Map();
+    viewport = {
+      width: window.innerWidth,
+      height: window.innerHeight
+    };
+    isStopped = false;
+    onSnapDebounced;
+    currentSnapIndex;
+    constructor(lenis2, { type = "proximity", lerp: lerp2, easing, duration, distanceThreshold = "50%", debounce: debounceDelay = 500, onSnapStart, onSnapComplete } = {}) {
       this.lenis = lenis2;
-      if (!window.lenis) {
-        window.lenis = {};
-      }
+      if (!window.lenis) window.lenis = {};
       window.lenis.snap = true;
       this.options = {
         type,
@@ -4925,25 +2814,12 @@
       };
       this.onWindowResize();
       window.addEventListener("resize", this.onWindowResize);
-      this.onSnapDebounced = debounce2(
-        this.onSnap,
-        this.options.debounce
-      );
+      this.onSnapDebounced = debounce2(this.onSnap, this.options.debounce);
       this.lenis.on("virtual-scroll", this.onSnapDebounced);
     }
-    options;
-    elements = /* @__PURE__ */ new Map();
-    snaps = /* @__PURE__ */ new Map();
-    viewport = {
-      width: window.innerWidth,
-      height: window.innerHeight
-    };
-    isStopped = false;
-    onSnapDebounced;
-    currentSnapIndex;
     /**
-     * Destroy the snap instance
-     */
+    * Destroy the snap instance
+    */
     destroy() {
       this.lenis.off("virtual-scroll", this.onSnapDebounced);
       window.removeEventListener("resize", this.onWindowResize);
@@ -4952,45 +2828,43 @@
       });
     }
     /**
-     * Start the snap after it has been stopped
-     */
+    * Start the snap after it has been stopped
+    */
     start() {
       this.isStopped = false;
     }
     /**
-     * Stop the snap
-     */
+    * Stop the snap
+    */
     stop() {
       this.isStopped = true;
     }
     /**
-     * Add a snap to the snap instance
-     *
-     * @param value The value to snap to
-     * @param userData User data that will be forwarded through the snap event
-     * @returns Unsubscribe function
-     */
+    * Add a snap to the snap instance
+    *
+    * @param value The value to snap to
+    * @param userData User data that will be forwarded through the snap event
+    * @returns Unsubscribe function
+    */
     add(value) {
       const id = uid();
       this.snaps.set(id, { value });
       return () => this.snaps.delete(id);
     }
     /**
-     * Add an element to the snap instance
-     *
-     * @param element The element to add
-     * @param options The options for the element
-     * @returns Unsubscribe function
-     */
+    * Add an element to the snap instance
+    *
+    * @param element The element to add
+    * @param options The options for the element
+    * @returns Unsubscribe function
+    */
     addElement(element, options = {}) {
       const id = uid();
       this.elements.set(id, new SnapElement(element, options));
       return () => this.elements.delete(id);
     }
     addElements(elements, options = {}) {
-      const map = [...elements].map(
-        (element) => this.addElement(element, options)
-      );
+      const map = [...elements].map((element) => this.addElement(element, options));
       return () => {
         map.forEach((remove) => {
           remove();
@@ -5007,16 +2881,10 @@
       this.elements.forEach(({ rect, align }) => {
         let value;
         align.forEach((align2) => {
-          if (align2 === "start") {
-            value = rect.top;
-          } else if (align2 === "center") {
-            value = isHorizontal ? rect.left + rect.width / 2 - this.viewport.width / 2 : rect.top + rect.height / 2 - this.viewport.height / 2;
-          } else if (align2 === "end") {
-            value = isHorizontal ? rect.left + rect.width - this.viewport.width : rect.top + rect.height - this.viewport.height;
-          }
-          if (typeof value === "number") {
-            snaps.push({ value: Math.ceil(value) });
-          }
+          if (align2 === "start") value = rect.top;
+          else if (align2 === "center") value = isHorizontal ? rect.left + rect.width / 2 - this.viewport.width / 2 : rect.top + rect.height / 2 - this.viewport.height / 2;
+          else if (align2 === "end") value = isHorizontal ? rect.left + rect.width - this.viewport.width : rect.top + rect.height - this.viewport.height;
+          if (typeof value === "number") snaps.push({ value: Math.ceil(value) });
         });
       });
       snaps = snaps.sort((a, b) => Math.abs(a.value) - Math.abs(b.value));
@@ -5059,20 +2927,15 @@
       if (this.options.type === "mandatory") return Number.POSITIVE_INFINITY;
       const { isHorizontal } = this.lenis;
       const axis = isHorizontal ? "width" : "height";
-      if (typeof this.options.distanceThreshold === "string" && this.options.distanceThreshold.endsWith("%")) {
-        distanceThreshold = Number(this.options.distanceThreshold.replace("%", "")) / 100 * this.viewport[axis];
-      } else if (typeof this.options.distanceThreshold === "number") {
-        distanceThreshold = this.options.distanceThreshold;
-      } else {
-        distanceThreshold = this.viewport[axis];
-      }
+      if (typeof this.options.distanceThreshold === "string" && this.options.distanceThreshold.endsWith("%")) distanceThreshold = Number(this.options.distanceThreshold.replace("%", "")) / 100 * this.viewport[axis];
+      else if (typeof this.options.distanceThreshold === "number") distanceThreshold = this.options.distanceThreshold;
+      else distanceThreshold = this.viewport[axis];
       return distanceThreshold;
     }
     onSnap = (e) => {
       if (this.isStopped) return;
       if (e.event.type === "touchmove") return;
-      if (this.options.type === "lock" && this.lenis.userData?.initiator === "snap")
-        return;
+      if (this.options.type === "lock" && this.lenis.userData?.initiator === "snap") return;
       let { scroll, isHorizontal } = this.lenis;
       const delta = isHorizontal ? e.deltaX : e.deltaY;
       scroll = Math.ceil(this.lenis.scroll + delta);
@@ -5082,26 +2945,19 @@
       const prevSnapIndex = snaps.findLastIndex(({ value }) => value < scroll);
       const nextSnapIndex = snaps.findIndex(({ value }) => value > scroll);
       if (this.options.type === "lock") {
-        if (delta > 0) {
-          snapIndex = nextSnapIndex;
-        } else if (delta < 0) {
-          snapIndex = prevSnapIndex;
-        }
+        if (delta > 0) snapIndex = nextSnapIndex;
+        else if (delta < 0) snapIndex = prevSnapIndex;
       } else {
         const prevSnap = snaps[prevSnapIndex];
         const distanceToPrevSnap = prevSnap ? Math.abs(scroll - prevSnap.value) : Number.POSITIVE_INFINITY;
         const nextSnap = snaps[nextSnapIndex];
-        const distanceToNextSnap = nextSnap ? Math.abs(scroll - nextSnap.value) : Number.POSITIVE_INFINITY;
-        snapIndex = distanceToPrevSnap < distanceToNextSnap ? prevSnapIndex : nextSnapIndex;
+        snapIndex = distanceToPrevSnap < (nextSnap ? Math.abs(scroll - nextSnap.value) : Number.POSITIVE_INFINITY) ? prevSnapIndex : nextSnapIndex;
       }
       if (snapIndex === void 0) return;
       if (snapIndex === -1) return;
       snapIndex = Math.max(0, Math.min(snapIndex, snaps.length - 1));
       const snap2 = snaps[snapIndex];
-      const distance = Math.abs(scroll - snap2.value);
-      if (distance <= this.distanceThreshold) {
-        this.goTo(snapIndex);
-      }
+      if (Math.abs(scroll - snap2.value) <= this.distanceThreshold) this.goTo(snapIndex);
     };
     resize() {
       this.elements.forEach((element) => {
@@ -5435,13 +3291,21 @@
       const targetPx = (targetIndex + 1) * window.innerHeight;
       state.lenis.scrollTo(targetPx, { immediate: true, force: true });
       if (state.snap) state.snap.currentSnapIndex = targetIndex + 1;
-      activateCard(targetIndex, "forward");
+      const prevStep2 = state.currentIndex;
+      activateCard(targetIndex);
+      if (prevStep2 >= 0 && prevStep2 !== targetIndex) {
+        deactivateCard(prevStep2, targetIndex > prevStep2 ? "forward" : "backward");
+      }
       state.currentIndex = targetIndex;
       state.scrollPosition = targetIndex + 1;
     } else {
+      const prevStep2 = state.currentMobileStep;
       state.currentMobileStep = targetIndex;
       state.mobileInIntro = false;
-      activateCard(targetIndex, "forward");
+      activateCard(targetIndex);
+      if (prevStep2 >= 0 && prevStep2 !== targetIndex) {
+        deactivateCard(prevStep2, targetIndex > prevStep2 ? "forward" : "backward");
+      }
       state.steps.forEach((step, i) => {
         if (i === targetIndex) {
           step.classList.add("mobile-active");
@@ -5461,13 +3325,13 @@
       const targetPx = (targetIndex + 1) * window.innerHeight;
       state.lenis.scrollTo(targetPx, { immediate: true, force: true });
       if (state.snap) state.snap.currentSnapIndex = targetIndex + 1;
-      activateCard(targetIndex, "forward");
+      activateCard(targetIndex);
       state.currentIndex = targetIndex;
       state.scrollPosition = targetIndex + 1;
     } else {
       state.currentMobileStep = targetIndex;
       state.mobileInIntro = false;
-      activateCard(targetIndex, "forward");
+      activateCard(targetIndex);
       state.steps.forEach((step, i) => {
         if (i === targetIndex) {
           step.classList.add("mobile-active");
@@ -5513,7 +3377,6 @@
   var rafId;
   var dwellTimer;
   var totalPositions = 0;
-  var keyboardNavInFlight = false;
   function initScrollEngine(stepCount) {
     const surface = document.querySelector(".scroll-surface");
     const cardStack = document.querySelector(".card-stack");
@@ -5558,7 +3421,6 @@
         state.isSnapping = false;
         const finalPosition = lenis.animatedScroll / window.innerHeight;
         updateScrollPosition(finalPosition);
-        writeHash();
         lenis.stop();
         dwellTimer = setTimeout(() => {
           if (!state.isPanelOpen) {
@@ -5567,13 +3429,6 @@
           dwellTimer = null;
         }, 500);
       }
-    });
-    registerSnapPoints(totalPositions);
-    let scrubEndTimer;
-    lenis.on("virtual-scroll", () => {
-      cardStack.classList.add("is-scrubbing");
-      clearTimeout(scrubEndTimer);
-      scrubEndTimer = setTimeout(() => cardStack.classList.remove("is-scrubbing"), 100);
     });
     lenis.on("scroll", (l) => {
       const position = l.animatedScroll / window.innerHeight;
@@ -5630,34 +3485,13 @@
     }
     target = Math.max(0, Math.min(target, totalPositions - 1));
     if (target === rounded && isExact) return;
-    if (direction === "backward") {
-      const contentStepIndex = Math.floor(Math.max(0, position - 1));
-      const scrubCard = state.textCards?.[contentStepIndex + 1];
-      if (scrubCard && !scrubCard.classList.contains("is-active")) {
-        const rot = parseFloat(scrubCard.dataset.messinessRot || 0);
-        const offX = parseFloat(scrubCard.dataset.messinessOffX || 0);
-        const offY = parseFloat(scrubCard.dataset.messinessOffY || 0);
-        scrubCard.style.transform = `translateY(100vh) rotate(${rot}deg) translate(${offX}px, ${offY}px)`;
-      }
-    }
     if (snap) snap.currentSnapIndex = target;
-    const targetStep = target - 1;
-    if (targetStep >= 0 && targetStep !== state.currentIndex) {
-      state.scrollDriven = true;
-      activateCard(targetStep, direction);
-      state.scrollDriven = false;
-      state.currentIndex = targetStep;
-      updateViewerInfo(targetStep);
-      if (state.onStepChange) state.onStepChange(targetStep);
-    }
-    keyboardNavInFlight = true;
     lenis.scrollTo(target * vh, {
       force: true,
       duration: 0.8,
       easing: (t) => 1 - Math.pow(1 - t, 3),
       // ease-out cubic
       onComplete: () => {
-        keyboardNavInFlight = false;
         writeHash();
       }
     });
@@ -5672,11 +3506,10 @@
   }
   function updateScrollPosition(position) {
     const contentPos = position - 1;
-    const maxContent = state.steps.length - 1;
     state.scrollPosition = position;
     if (position < 1) {
       state.scrollProgress = 0;
-      if (state.currentIndex >= 0 && !keyboardNavInFlight) {
+      if (state.currentIndex >= 0) {
         goToStep(-1, "backward");
       }
       const progress2 = position;
@@ -5695,19 +3528,11 @@
       }
       return;
     }
-    const clamped = Math.min(maxContent, contentPos);
-    const stepIndex = Math.floor(clamped);
-    const progress = clamped - stepIndex;
+    const { stepIndex, progress } = scrollCardPool(contentPos);
     state.scrollProgress = progress;
-    setCardProgress(stepIndex, progress);
-    lerpIiifPosition(stepIndex, progress, state.stepsData || []);
-    lerpModelCamera(stepIndex, progress, state.stepsData || []);
-    if (stepIndex !== state.currentIndex && !keyboardNavInFlight) {
-      const direction = stepIndex > state.currentIndex ? "forward" : "backward";
-      state.scrollDriven = true;
-      activateCard(stepIndex, direction);
-      state.scrollDriven = false;
+    if (stepIndex !== state.currentIndex) {
       state.currentIndex = stepIndex;
+      writeHash();
       updateViewerInfo(stepIndex);
       if (state.onStepChange) state.onStepChange(stepIndex);
     }
@@ -5719,6 +3544,7 @@
   }
   function goToStep(newIndex, direction = "forward") {
     if (newIndex < -1 || newIndex >= state.steps.length) return;
+    const prevStep2 = state.currentIndex;
     state.currentIndex = newIndex;
     if (newIndex === -1) {
       const intro = document.querySelector(".story-intro");
@@ -5726,20 +3552,7 @@
         intro.style.transition = "transform 0.5s ease-out";
         intro.style.transform = "translateY(0)";
       }
-      const firstCard = state.textCards?.[0];
-      if (firstCard) {
-        firstCard.classList.remove("is-active", "is-stacked");
-        const rot = parseFloat(firstCard.dataset.messinessRot || 0);
-        const offX = parseFloat(firstCard.dataset.messinessOffX || 0);
-        const offY = parseFloat(firstCard.dataset.messinessOffY || 0);
-        firstCard.style.transform = `translateY(100vh) rotate(${rot}deg) translate(${offX}px, ${offY}px)`;
-      }
-      const firstObject = window.storyData?.firstObject;
-      if (firstObject && state.viewerPlates?.[firstObject]) {
-        const plate = state.viewerPlates[firstObject];
-        plate.style.transform = "translateY(100%)";
-        plate.classList.remove("is-active");
-      }
+      returnToIntro();
       state.currentObjectRun = { objectId: null, runPosition: 0 };
       updateViewerInfo(-1);
       const creditBadge = document.getElementById("object-credits-badge");
@@ -5747,7 +3560,8 @@
       if (state.onStepChange) state.onStepChange(-1);
       return;
     }
-    activateCard(newIndex, direction);
+    activateCard(newIndex, true);
+    if (prevStep2 >= 0 && prevStep2 !== newIndex) deactivateCard(prevStep2, direction);
     updateViewerInfo(newIndex);
     if (state.onStepChange) state.onStepChange(newIndex);
   }
@@ -5858,7 +3672,7 @@
       intro.style.transform = "translateY(-100%)";
     }
     state.currentMobileStep = 0;
-    activateCard(0, "forward");
+    activateCard(0);
     updateViewerInfo(0);
     updateMobileButtonStates();
   }
@@ -5879,6 +3693,7 @@
     setTimeout(() => {
       state.mobileNavigationCooldown = false;
     }, MOBILE_NAV_COOLDOWN);
+    const prevStep2 = state.currentMobileStep;
     const direction = newIndex > state.currentMobileStep ? "forward" : "backward";
     state.steps[state.currentMobileStep].classList.remove("mobile-active");
     state.steps[newIndex].classList.add("mobile-active");
@@ -5887,7 +3702,8 @@
     if (state.lenis) {
       advanceToStep(newIndex);
     } else {
-      activateCard(newIndex, direction);
+      activateCard(newIndex, true);
+      if (prevStep2 >= 0 && prevStep2 !== newIndex) deactivateCard(prevStep2, direction);
     }
     updateViewerInfo(newIndex);
     writeHash();
