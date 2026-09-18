@@ -1,30 +1,127 @@
 ## Initial Idea
 
-- Refactor telar to help with existing architecture issues in the frontend
-- 1. Refactor existing js into typescript to have a better front end architecture
+- Refactor telar to help with existing architecture issues in the frontend. This assumes we will change things step by step. 
+- The tradeoff: From my prelim research, I think using 11ty could help us do some things more easily and better separate resposabilities between python / static templates / javascript. But that would maybe require a refactor in the separate order than I am thinking maybe refactor all the processing things, ove many of them from python into 11ty and then do a more simple js/typescript. This would move more complexity to 11ty and remove it from python. The question is if we want this. Where do you want the complexity to live in custom python scripts or in 11ty? 
+
+1. Refactor existing js into typescript to have a better front end architecture
     - I think this could be done so that the ts exports modules that are imported on each page
-    - We are sacrificing some of the licensing MIT vs apache because of typescript
-        - what does this entail?
+    - From Juan:  he mentioned something about licensing
+        - Typescript has Apache 2.0, requires adding and entry to notice, ruby also has apache 2.0
     - Migration to typescript by modules
-        1. story module: refactor assets/js/telar-story to create a js library from typescript that takes as input the steps metadata and config information and creates the scrolling view of a telar
-            - What are the main features to mantain? 
-                - transform telar steps into a different data structure: scene, which are consecutive steps for the same object
-                - support different object types: iiif images, audio files, video files, pdf files
-                - support different forms of navigation: scroll, keyboard navigation, button navigation on mobile 
-                - support story-fragments - template generated html from markdown
-                    - support latex rendering inside the mardoen generated content
-                    - support widgets - template generated html? - used to show carousel, tabs, accordion, bibliography
-                - support encrypted data for story-fragments
-            - What is changing?
-                - change the way the scroll works without stacking cards and instead cards that scroll by 
+    - How to come up with the new archtiecture for the story frontend 
+        1. overarching architecture questions
             - Is it worth it to keep iife as a compile target for the js bundle?
                 - iife is a legacy module formats, es modules is more modern and can allow dynamic imports which are right now done with vanilla js
                 - I think it was originally added for compatibility with the file protocol, but the fetch function is not compatible with that protocol anyways 
                 - This allows us to dynamically loads scripts just using import without custom code
             - Should we move vendor to npm modules? are there any we cannot vendor? 
-            - What is the data structure that the static page story.html needs to pass to the script?
-                - is any structure provided on the html itself or is it all json?
-        2. continue moving other modules to typescript
+        2. what is the role of python / jekyll (or other templating langugage) / and js?
+            - I think one big issue is that there are three powerful languages and frameworks all used to process things, somtimes the same kind of thing differently 
+                - jekyll is not powerful enough for some templating functionality so it was moved to python:
+                    - read external markdown files
+                    - widgets
+                    - building the glossary
+                    - latex rendering
+                    - template validation
+                - mardkown processing:
+                    - the markdown for answer / panels is rendered in different places (template for answer vs python for panel)
+                - html rendering:
+                    - Jekyll renders the page layout, the intro card, and a hidden block of per-step question, html rendered answer from markdown, and panel buttons
+                    - JavaScript builds every card, plate and overlay, cloning the step into the text card.
+                - encrypton complicated this division of labor
+                    - answers are rendered by jekyll when unencripted but rendered as plain/ stripped mardown when encrypted  
+            - what is a clear responsability for each stack? 
+                - maybe in this case python renders all the markdown (that way stories can be encrypted), and js builds the story. Jekyll just injects the pre-rendered python data so that the js can create the story page.
+                - the assumed cost: a lot of front-end lives actually in python, in how it renders the markdown
+            - can another templating engine help with the separation of responsability? 
+                - I am looking into 11ty, if it is more powerful then maybe that frontend logic could live outside of the python pre-processing? we will change the templating anyways so its a question of how much it becomes just a shell for this module
+                - From my very prelim research, I think using 11ty could help us do some things more easily and better separate resposabilities between python / static templates / javascript. But that would maybe require a refactor in the separate order than I am thinking maybe refactor all the processing things, ove many of them from python into 11ty and then do a more simple js/typescript. This would move more complexity to 11ty and remove it from python. The question is if we want this. Where do you want the complexity to live in custom python scripts or in 11ty? 
+        3. come up with a simple scrolling engine based on lenis 
+            - tranform the story data (steps with or without objects and pre-rendered python content) into a collection of card objects
+            - simple scrolling engine based on lenis that can support the vertical movement of card objects in and out of the page
+                - continuous movement (scroll) can be forward or backward
+                - discrete movement in which cards animate between their centered position 
+                - title and panel card objects appear to be stacked:
+                    - when a user scrolls down the bottom object stacks on top of the one in the screen
+                    - when a user scroll up the objecton screen moves down and reveal the previous object bellow it
+                    - all cards have a centered position on which they are considered in full view
+                - text cards don't stack
+                - they scroll by continously
+                - on discrete mode they stop in the center and then move off-screen
+            - full page cards can be title cards or panel cards.
+                - title cards don't have an object
+                - panel cards have an object and a collection of text cards
+            - how the objects move depending on type
+                - the text cards scroll-by with the panel card fixed as long as they belong to the same panel
+                - when the panel changes it scrolls along the corresponding card revealing the other panel card + text card or title card
+            - each title card or text card has a step number, when that card is centered the number should be the one on that card
+        4. try to come up with an architecture for the story module using the simple scrolling engine as baseline. 
+            - I think the visualizers are too complex to specify without the full code so they should be just a shell for this step
+            - I think a good effort would be to try to least as much of the features in the story module and try to promp an architecture without giving claude the original code, to avoid issues or it trying to stick to or patch the old code. I think even if we tell it to not copy, there are concepts that can leak? is just a hypothesis.
+            - This is the best structure I have so far:
+            - story module features: refactor assets/js/telar-story to create a js library from typescript that takes as input the steps metadata and config information and creates the scrolling view of a telar
+                - transform telar steps into a different data structure
+                    - a collection of title cards and scenes, which are consecutive steps for the same object
+                - create and visualize intro title card
+                    - data: tile and byline
+                    - note: byline can be markdown processed by the template
+                - visualize and scroll plate cards
+                    - data: the consecutive steps with the same object
+                    - types
+                        - iiif images
+                        - audio files
+                        - video (youtube/vimeo)
+                        - pdf files
+                    - each plate receives the data fromt he scrolling engine to determine a speficic position for the iiif image / pdf file
+                    - has credit badge
+                - visualize and scroll text cards
+                    - data: each step that has an object
+                    - uses the question / answer as the heading / content of the text card
+                    - note: the card inner html is rendendered on the template. I think this pre-processing takes care of the markdown (for the answer)/ glossary / latex
+                - visualize title cards
+                    - data: these are created from steps without object
+                    - bug: opening section after title card does not reveal the title back and seems to break. I tried with two consecutive title cards and that seems to work
+                - vertiucal visualization flow
+                    - every story starts with a title card
+                    - scens and title cards switch by sliding over or down moving the whole background scene 
+                        - bug: right now the transition from a scene to a title card moving up makes the background disappear but this may be a bug. i think it would be easier to keep the behavior consistent
+                    - text cards just slide over with the background and panel staying in place
+                - support different forms of veritcal navigation
+                    - scroll 
+                        -  it smootly moves the cards, title cards, and scene plates and interpolate the positions for the image and pdf viewers 
+                        - for audio and video objects [?]
+                        - bug: I identified this in in previous refactor but the scrolling does not work too well, sometimes when scrolling up the pages get stuck I think its because there is a threshold to hide the pages that does not get reached, but not sure it can be patched in the current architecture
+                    - keyboard ( up/down arrows)
+                    - button navigation on mobile
+                    - deep links that scroll to a particu
+                    - back to top button
+                - show back home button on the intro card instead of back to top
+                - show step number
+                - show table of content
+                    - is configurable with `show_sections`
+                    - shows a list of the headings
+                    - bug: looks like now there is a styling issue and the link has the same color of the bacground, also not sure why the bacgkound changes for the title card
+                    - bug: there is also a styling issue that the sections dont have a bounded-height container that can be scrolled and just push the title content when too many sections
+                - show panels
+                    - data: layer1_content and layer2_content columns
+                    - layer 1 is revealed abutton triggered on the text card of a step 
+                    - layer 2 is revealed abutton triggered on the text card of a layer 1 
+                    - layers can also be opened and closed with left and right arrows
+                    - the layers 1 renders on top of the cards and block vertical movement when open
+                    - the layer 2 covers the layer 1
+                - show glossary
+                    - data: markdown annotations for glossary in answer or layer_content
+                    - TODO: bettter document this
+                - support story-fragments - template generated html from markdown
+                    - support latex rendering inside the mardoen generated content
+                    - support widgets - template generated html? - used to show carousel, tabs, accordion, bibliography
+                        - bug: for me images were not working in the carousel with internal images from the objects, I had to use external image links
+                - support encrypted data for story-fragments
+                    - TODO: better document this
+        5. evaluate the new architecture against the old code
+            - we can give clause the full code later and ask what parts are not being supported 
+    - I dont have that much knowledge of these other modules but we can see after the story front-end module has been ported?
+        - continue moving other modules to typescript
             - object -  the scrips to preview a single object and get the coordinates / timesteps for different types of objects
             - home
             - objects-index
